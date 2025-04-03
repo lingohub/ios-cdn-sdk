@@ -1,0 +1,27 @@
+/*
+  Localizable.strings
+  Test App Lingohub
+
+  Created by Manfred Baldauf on 13.03.25.
+
+*/
+
+/* Welcome message shown on the main screen */
+"welcome_message" = "Welcome to Lingohub";
+
+/* Brief description of the app */
+"app_description" = "This app demonstrates the integration of Lingohub SDK for iOS";
+
+"app_description+2" = "232";
+
+/* Button to refresh translations */
+"refresh_button" = "Refresh Translations";
+
+/* Button to switch to German language */
+"switch_to_german" = "Switch to German";
+
+/* Button to switch to English language */
+"switch_to_english" = "Switch to English";
+
+/* Button to check for updates */
+"check_for_updates" = "Check for Updates";

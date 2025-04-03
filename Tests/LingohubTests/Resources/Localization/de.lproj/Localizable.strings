@@ -1,0 +1,9 @@
+/*
+  Localizable.strings
+  Lingohub
+
+  Created by Stefan Edler on 21.01.20.
+
+*/
+
+"StringPlain" = "Text aus dem Test Bundle";

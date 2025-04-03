@@ -1,0 +1,24 @@
+{
+  "originHash" : "92aa10602ed2b5711ef1bf0d4249a3315f86445c2f3499c260a3ca50b4301dcd",
+  "pins" : [
+    {
+      "identity" : "ios-cdn-sdk",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/lingohub/ios-cdn-sdk",
+      "state" : {
+        "revision" : "1e900f3b84841ebc42f00a3bc0e9c5ed807f57e0",
+        "version" : "1.0.0"
+      }
+    },
+    {
+      "identity" : "zipfoundation",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/weichsel/ZIPFoundation.git",
+      "state" : {
+        "revision" : "02b6abe5f6eef7e3cbd5f247c5cc24e246efcfe0",
+        "version" : "0.9.19"
+      }
+    }
+  ],
+  "version" : 3
+}
