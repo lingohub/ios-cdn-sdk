@@ -1,5 +1,7 @@
 # Lingohub iOS SDK
 
+[![License](https://img.shields.io/github/license/lingohub/upload-action?style=flat-square)](./LICENSE)
+
 A Swift SDK for integrating Lingohub's over-the-air localization services in iOS applications. This SDK allows you to update your app's localizations without requiring a new app release.
 
 ## Features
