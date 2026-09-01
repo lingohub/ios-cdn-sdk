@@ -7,3 +7,4 @@
 */
 
 "StringPlain" = "Text aus dem Test Bundle";
+"OnlyInAppBundle" = "App bundle value";

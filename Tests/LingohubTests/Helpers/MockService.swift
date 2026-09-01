@@ -66,6 +66,24 @@ extension MockService {
         mock.register()
     }
 
+    /// A 200 check response built at runtime, for tests that need a specific
+    /// download URL or checksum in the release metadata.
+    public static func mockUpdate200(filesUrl: String, sha256: String? = nil) {
+        var payload: [String: Any] = [
+            "distributionReleaseId": "test-bundle-id",
+            "name": "Test Bundle",
+            "filesUrl": filesUrl
+        ]
+        if let sha256 {
+            payload["filesSha256"] = sha256
+        }
+        let data = try! JSONSerialization.data(withJSONObject: payload)
+        let mock = Mock(url: updateUrl, ignoreQuery: true, contentType: .json, statusCode: 200, data: [
+            .post: data
+        ])
+        mock.register()
+    }
+
     @objc public static func mockUpdate204() {
         let data = loadResource("empty", withExtension: "json")
         let mock = Mock(url: updateUrl, ignoreQuery: true, contentType: .json, statusCode: 204, data: [
