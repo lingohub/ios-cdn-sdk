@@ -6,7 +6,6 @@
 //
 
 import Foundation
-import ZIPFoundation
 
 /**
  LingoHub iOS SDK
@@ -25,12 +24,22 @@ import ZIPFoundation
     @objc var sdkVersion: String?
 
     /**
-     The language override set via `setLanguage(_:)`, or `nil` when the SDK follows the
-     system language. For the language actually being served, use ``currentLanguageCode``.
+     The language override, or `nil` when the SDK follows the system language.
+
+     Setting this property behaves exactly like calling ``setLanguage(_:)`` (a non-nil
+     value is persisted and restored on the next launch) or ``setSystemLanguage()``
+     (`nil` removes the persisted override). For the language actually being served,
+     use ``currentLanguageCode``.
      */
     @objc public var language: String? {
         get { cacheManager.language }
-        set { cacheManager.language = newValue }
+        set {
+            if let newValue {
+                setLanguage(newValue)
+            } else {
+                setSystemLanguage()
+            }
+        }
     }
 
     /**
@@ -41,8 +50,13 @@ import ZIPFoundation
         return effectiveLanguageCode
     }
 
-    lazy var apiClient = APIClient(basePath: LingoHubConstants.basePath)
+    var apiClient: any APIClientProtocol = APIClient(basePath: LingoHubConstants.basePath)
+    var installer = UpdateInstaller()
     let cacheManager = LocalizationCacheManager.shared
+
+    /// The running update cycle, if any. Concurrent `update`/`updateAsync` calls
+    /// join it instead of starting a second network round-trip and install.
+    private var inFlightUpdate: Task<Bool, Error>?
 
     @objc var swizzledBundles: [String] {
         get { cacheManager.swizzledBundlePaths }
@@ -78,19 +92,26 @@ public extension LingoHubSDK {
             return
         }
 
-        LingoHubLogger.shared.log("App version from Info.plist: \(version)")
-        LingoHubLogger.shared.log("Environment set to: \(environment.rawValue)")
+        LingoHubLogger.shared.log("App version: \(version), environment: \(environment.rawValue)")
 
         // Move translations downloaded by SDK 1.0.x from Documents to Application Support
         cacheManager.migrateLegacyStorageIfNeeded()
+
+        // Remove staging directories a crashed install may have left behind
+        cacheManager.removeStagingLeftovers()
+
+        // Restore the downloaded release from disk, healing partial state from
+        // crashed installs (missing bundle, missing metadata)
+        cacheManager.restoreFromDisk()
 
         // if the app version has changed, remove all updated bundles
         if isUpdatedBundleUsed, let currentVersion = updateAppVersion, currentVersion != version {
             cleanUp()
         }
 
-        // Restore a persisted language override, otherwise use the system language
-        language = UserDefaults.standard.string(forKey: LingoHubConstants.languageOverride) ?? Locale.lingohubLanguageCode
+        // Restore only a persisted language override; nil means the SDK follows the
+        // system language (see the `language` documentation).
+        cacheManager.language = UserDefaults.standard.string(forKey: LingoHubConstants.languageOverride)
 
         self.appVersion = version
     }
@@ -101,7 +122,7 @@ public extension LingoHubSDK {
      - Parameter language: The ISO 639-1 two letter language code of the language, e.g. 'en' or 'de'
      */
     func setLanguage(_ language: String) {
-        self.language = language
+        cacheManager.language = language
         UserDefaults.standard.set(language, forKey: LingoHubConstants.languageOverride)
     }
 
@@ -109,7 +130,7 @@ public extension LingoHubSDK {
      Reset the language back to the system language and remove the persisted override.
      */
     func setSystemLanguage() {
-        self.language = nil
+        cacheManager.language = nil
         UserDefaults.standard.removeObject(forKey: LingoHubConstants.languageOverride)
     }
 
@@ -122,17 +143,15 @@ public extension LingoHubSDK {
      - Returns: The updated string or nil
      */
     func localizedString(forKey key: String, tableName: String? = nil) -> String? {
-        // Use the cache manager to get the string
-        if let string = cacheManager.getString(forKey: key, tableName: tableName, language: language) {
-            return string
-        }
-        return nil
-
+        return cacheManager.getString(forKey: key, tableName: tableName, language: language)
     }
 
     /**
      Swizzle the main Bundle of your Application.
      If swizzling is enabled just continue using *NSLocalizedString* methods as usual, LingoHub will do the rest.
+
+     Swizzling stays active for the lifetime of the process; there is no API to
+     disable it at runtime.
      */
     func swizzleMainBundle() {
         swizzleBundle(Bundle.main)
@@ -167,12 +186,20 @@ public extension LingoHubSDK {
      Check if there are any localization updates available for your app on LingoHub
      Use the result-closure or the `LingoHubDidUpdateLocalization` notification as status callback
 
+     The closure is always called on the main queue. Concurrent calls share one
+     update cycle and receive the same result.
+
      - Parameter result: Closure to check for updated content. `True` means the content was updated, `False` that there was no new content.
      */
     func update(result: (@Sendable (Result<Bool, LingoHubSDKError>) -> Void)? = nil) {
-        checkForUpdate { response in
-            DispatchQueue.main.async {
-                result?(response)
+        Task { @MainActor in
+            do {
+                let updated = try await updateAsync()
+                result?(.success(updated))
+            } catch let error as LingoHubSDKError {
+                result?(.failure(error))
+            } catch {
+                result?(.failure(.unknown))
             }
         }
     }
@@ -184,16 +211,21 @@ public extension LingoHubSDK {
      Named distinctly from `update(result:)` so that existing fire-and-forget
      `update()` calls in async contexts keep compiling unchanged.
 
+     Concurrent calls join the running update cycle and receive its result instead
+     of starting a second network round-trip.
+
      - Returns: `true` if new translations were downloaded and are active, `false` if there was nothing new.
      - Throws: `LingoHubSDKError` when the update check fails.
      */
     @discardableResult
     func updateAsync() async throws -> Bool {
-        try await withCheckedThrowingContinuation { continuation in
-            checkForUpdate { result in
-                continuation.resume(with: result)
-            }
+        if let inFlightUpdate {
+            return try await inFlightUpdate.value
         }
+        let task = Task { try await self.performUpdate() }
+        inFlightUpdate = task
+        defer { inFlightUpdate = nil }
+        return try await task.value
     }
 }
 
@@ -217,179 +249,131 @@ public extension Notification.Name {
     }
 }
 
+// MARK: Update Cycle
+
 extension LingoHubSDK {
-    /**
-     Check if there are any localization updates available for your app on LingoHub
-     Use the result-closure or the `LingoHubDidUpdateLocalization` notification as status callback
-
-     - Parameter result: Closure to check for updated content. `True` means the content was updated, `False` that there was no new content.
-     */
-    func checkForUpdate(result: @escaping @Sendable (Result<Bool, LingoHubSDKError>) -> Void) {
-
+    /// Runs one complete update cycle: check → download → verify → install → publish.
+    /// Throws `LingoHubSDKError` exclusively.
+    private func performUpdate() async throws -> Bool {
         guard let sdkVersion = sdkVersion else {
             LingoHubLogger.shared.log("Error: Invalid SDK version")
-            result(.failure(LingoHubSDKError.invalidSdkVersion))
-            return
+            throw LingoHubSDKError.invalidSdkVersion
         }
-       LingoHubLogger.shared.log("SDK Version: \(sdkVersion)")
 
         guard let appVersion = appVersion else {
-           LingoHubLogger.shared.log("Error: Invalid app version")
-            result(.failure(LingoHubSDKError.invalidAppVersion))
-            return
+            LingoHubLogger.shared.log("Error: Invalid app version")
+            throw LingoHubSDKError.invalidAppVersion
         }
-       LingoHubLogger.shared.log("App Version: \(appVersion)")
 
         guard let apiKey = apiKey else {
-           LingoHubLogger.shared.log("Error: Invalid API key")
-            result(.failure(LingoHubSDKError.invalidApiKey))
-            return
+            LingoHubLogger.shared.log("Error: Invalid API key")
+            throw LingoHubSDKError.invalidApiKey
         }
 
         // After a 429 (usage budget exhausted) the SDK pauses update checks for a while
         // instead of hammering the CDN.
         if let cooldownUntil = usageLimitCooldownUntil, cooldownUntil > Date() {
             LingoHubLogger.shared.log("Usage limit cooldown active until \(cooldownUntil), skipping update check")
-            result(.failure(LingoHubSDKError.apiError(statusCode: 429, message: "Usage limit reached. Update checks are paused until \(cooldownUntil).", errorCodes: ["USAGE_LIMIT_EXCEEDED"])))
-            return
+            throw LingoHubSDKError.apiError(statusCode: 429, message: "Usage limit reached. Update checks are paused until \(cooldownUntil).", errorCodes: ["USAGE_LIMIT_EXCEEDED"])
         }
 
-       LingoHubLogger.shared.log("Current Bundle ID: \(distributionVersion ?? "nil")")
-       LingoHubLogger.shared.log("Environment: \(environment)")
-       LingoHubLogger.shared.log("Device ID: \(deviceIdentifier ?? "nil")")
+        LingoHubLogger.shared.log("Checking for updates (release: \(distributionVersion ?? "none"), environment: \(environment))")
 
-        apiClient.checkForUpdates(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion, distributionVersion: distributionVersion, environment: environment, deviceIdentifier: deviceIdentifier, languageCode: effectiveLanguageCode) { [weak self] response in
-            do {
-                let bundleInfo = try response()
-                LingoHubLogger.shared.log("Bundle info received: \(bundleInfo)")
+        do {
+            let bundleInfo = try await apiClient.checkForUpdates(
+                apiKey: apiKey,
+                appVersion: appVersion,
+                sdkVersion: sdkVersion,
+                distributionVersion: distributionVersion,
+                environment: environment,
+                deviceIdentifier: deviceIdentifier,
+                languageCode: effectiveLanguageCode
+            )
 
-                if let self = self {
-                    Task { @MainActor in
-                        LingoHubLogger.shared.log("Preparing to download update...")
-                        LingoHubLogger.shared.log("Starting download from URL: \(bundleInfo.filesUrl)")
-                        self.downloadUpdate(atUrl: bundleInfo.filesUrl, withIdentifier: bundleInfo.id, appVersion: appVersion, result: result)
-                    }
-                } else {
-                    LingoHubLogger.shared.log("Self is nil, cannot proceed with download")
-                    result(.success(false))
-                }
-            } catch APIError.noContent {
-                LingoHubLogger.shared.log("No content available for update")
-                result(.success(false))
-            } catch APIError.apiError(404, _, let infos) where infos.contains("DISTRIBUTION_NOT_FOUND") {
-                // The CDN's DISTRIBUTION_NOT_FOUND means no release matches this app version
-                // and no fallback release exists (e.g. nothing has been published yet).
-                // That is a normal state, not an error. Any other 404 stays a failure.
-                LingoHubLogger.shared.log("No distribution release available for this app (404 DISTRIBUTION_NOT_FOUND)")
-                result(.success(false))
-            } catch APIError.apiError(let statusCode, let message, let infos) {
-                LingoHubLogger.shared.log("API error: Status \(statusCode), Message: \(message ?? "No message")")
-                if statusCode == 429 {
-                    // Usage budget exhausted; pause update checks client-side.
-                    UserDefaults.standard.set(Date().addingTimeInterval(LingoHubConstants.usageLimitCooldownInterval).timeIntervalSince1970, forKey: LingoHubConstants.usageCooldownUntil)
-                }
-                result(.failure(LingoHubSDKError.apiError(statusCode: statusCode, message: message, errorCodes: infos)))
-            } catch let error as DecodingError {
-                // Handle decoding errors specifically
-                let errorMessage = self?.formatDecodingError(error) ?? "JSON decoding error"
-                LingoHubLogger.shared.log("Decoding error: \(errorMessage)")
-                result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: errorMessage, errorCodes: [])))
-            } catch let error as URLError {
-                // Transport failure before any response was received (offline, DNS, timeout):
-                // statusCode 0 per the documented apiError contract.
-                LingoHubLogger.shared.log("Network error: \(error.localizedDescription)")
-                result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: error.localizedDescription, errorCodes: [])))
-            } catch APIError.invalidURL {
-                LingoHubLogger.shared.log("Invalid request URL")
-                result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: "Invalid request URL", errorCodes: [])))
-            } catch APIError.invalidResponse {
-                LingoHubLogger.shared.log("Invalid response from the server")
-                result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: "Invalid response from the server", errorCodes: [])))
-            } catch {
-                LingoHubLogger.shared.log("Unexpected error: \(error)")
-                result(.failure(LingoHubSDKError.unknown))
+            // The CDN is HTTPS-only; a non-HTTPS download URL in the metadata means
+            // something between the SDK and the CDN is broken or hostile.
+            guard bundleInfo.filesUrl.scheme?.lowercased() == "https" else {
+                LingoHubLogger.shared.log("Rejecting non-HTTPS download URL")
+                throw LingoHubSDKError.apiError(statusCode: 0, message: "Insecure download URL rejected", errorCodes: [])
             }
+
+            let archiveURL = try await apiClient.download(from: bundleInfo.filesUrl)
+            defer { try? FileManager.default.removeItem(at: archiveURL) }
+
+            try await installArchive(at: archiveURL, identifier: bundleInfo.id, appVersion: appVersion, expectedSha256: bundleInfo.filesSha256)
+            return true
+        } catch APIError.noContent {
+            LingoHubLogger.shared.log("No content available for update")
+            return false
+        } catch APIError.apiError(404, _, let infos) where infos.contains("DISTRIBUTION_NOT_FOUND") {
+            // The CDN's DISTRIBUTION_NOT_FOUND means no release matches this app version
+            // and no fallback release exists (e.g. nothing has been published yet).
+            // That is a normal state, not an error. Any other 404 stays a failure.
+            LingoHubLogger.shared.log("No distribution release available for this app (404 DISTRIBUTION_NOT_FOUND)")
+            return false
+        } catch let error as LingoHubSDKError {
+            throw error
+        } catch APIError.apiError(let statusCode, let message, let infos) {
+            LingoHubLogger.shared.log("API error: Status \(statusCode), Message: \(message ?? "No message")")
+            if statusCode == 429 {
+                // Usage budget exhausted; pause update checks client-side.
+                UserDefaults.standard.set(Date().addingTimeInterval(LingoHubConstants.usageLimitCooldownInterval).timeIntervalSince1970, forKey: LingoHubConstants.usageCooldownUntil)
+            }
+            throw LingoHubSDKError.apiError(statusCode: statusCode, message: message, errorCodes: infos)
+        } catch let error as DecodingError {
+            let errorMessage = formatDecodingError(error)
+            LingoHubLogger.shared.log("Decoding error: \(errorMessage)")
+            throw LingoHubSDKError.apiError(statusCode: 0, message: errorMessage, errorCodes: [])
+        } catch let error as URLError {
+            // Transport failure before any response was received (offline, DNS, timeout):
+            // statusCode 0 per the documented apiError contract.
+            LingoHubLogger.shared.log("Network error: \(error.localizedDescription)")
+            throw LingoHubSDKError.apiError(statusCode: 0, message: error.localizedDescription, errorCodes: [])
+        } catch APIError.invalidURL {
+            LingoHubLogger.shared.log("Invalid request URL")
+            throw LingoHubSDKError.apiError(statusCode: 0, message: "Invalid request URL", errorCodes: [])
+        } catch APIError.invalidResponse {
+            LingoHubLogger.shared.log("Invalid response from the server")
+            throw LingoHubSDKError.apiError(statusCode: 0, message: "Invalid response from the server", errorCodes: [])
+        } catch {
+            LingoHubLogger.shared.log("Unexpected error: \(error)")
+            throw LingoHubSDKError.unknown
         }
     }
 
-    func downloadUpdate(atUrl url: URL, withIdentifier identifier: String, appVersion: String, result: @escaping @Sendable (Result<Bool, LingoHubSDKError>) -> Void) {
-        LingoHubLogger.shared.log("Starting download from URL: \(url.absoluteString)")
-
-        apiClient.download(url: url) { [weak self] response in
-            LingoHubLogger.shared.log("Download response received")
-
-            guard let self = self else {
-                LingoHubLogger.shared.log("Self is nil, cannot process download response")
-                result(.failure(LingoHubSDKError.unknown))
-                return
-            }
-
-            do {
-                let temporaryUrl = try response()
-                LingoHubLogger.shared.log("Download completed to temporary URL: \(temporaryUrl.path)")
-
-                // Verify the downloaded file exists
-                let fileManager = FileManager.default
-                guard fileManager.fileExists(atPath: temporaryUrl.path) else {
-                    LingoHubLogger.shared.log("Error: Downloaded file does not exist at path: \(temporaryUrl.path)")
-                    result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: "Downloaded file does not exist", errorCodes: [])))
-                    return
-                }
-
-                Task { @MainActor in
-                    LingoHubLogger.shared.log("Starting extraction process...")
-                    defer { try? fileManager.removeItem(at: temporaryUrl) }
-                    do {
-                        try self.useUpdatedBundle(atURL: temporaryUrl, withIdentifier: identifier, appVersion: appVersion)
-                        LingoHubLogger.shared.log("Bundle successfully updated")
-                        result(.success(true))
-                    } catch APIError.apiError(let statusCode, let message, let infos) {
-                        LingoHubLogger.shared.log("API error during extraction: \(statusCode), \(message ?? "No message")")
-                        result(.failure(LingoHubSDKError.apiError(statusCode: statusCode, message: message, errorCodes: infos)))
-                    } catch {
-                        LingoHubLogger.shared.log("Error extracting bundle: \(error)")
-                        result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: "Failed to extract bundle: \(error.localizedDescription)", errorCodes: [])))
-                    }
-                }
-            } catch APIError.apiError(let statusCode, let message, let infos) {
-                LingoHubLogger.shared.log("API error during download: \(statusCode), \(message ?? "No message")")
-                result(.failure(LingoHubSDKError.apiError(statusCode: statusCode, message: message, errorCodes: infos)))
-            } catch {
-                LingoHubLogger.shared.log("Error downloading bundle: \(error)")
-                result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: "Failed to download bundle: \(error.localizedDescription)", errorCodes: [])))
-            }
-        }
-    }
-
-    @MainActor
-    @objc func useUpdatedBundle(atURL url: URL, withIdentifier identifier: String, appVersion: String) throws {
-        let fileManager = FileManager.default
-        // Use the cacheManager to get the destination URL
-        guard let destinationURL = cacheManager.updateBundleUrl else {
-           LingoHubLogger.shared.log("Could not determine update bundle destination URL.")
-            throw APIError.invalidURL
+    /// Installs a downloaded release archive and publishes it:
+    /// stage + validate + swap (off the main actor), then — back on the main actor —
+    /// activate the new snapshot, persist the release metadata, and notify observers.
+    /// Observers of `LingoHubDidUpdateLocalization` always see the new release.
+    func installArchive(at archiveURL: URL, identifier: String, appVersion: String, expectedSha256: String? = nil) async throws {
+        guard let liveBundleURL = cacheManager.updateBundleUrl,
+              let folderURL = cacheManager.updateBundleFolderUrl else {
+            LingoHubLogger.shared.log("Could not determine update bundle destination URL.")
+            throw LingoHubSDKError.apiError(statusCode: 0, message: "Could not determine storage location", errorCodes: [])
         }
 
-        var isDirectory: ObjCBool = false
-        if fileManager.fileExists(atPath: destinationURL.path, isDirectory: &isDirectory), isDirectory.boolValue {
-            try fileManager.removeItem(at: destinationURL)
+        do {
+            try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
+            _ = try await installer.install(archiveURL: archiveURL, liveBundleURL: liveBundleURL, expectedSha256: expectedSha256)
+        } catch {
+            LingoHubLogger.shared.log("Error installing bundle: \(error)")
+            throw LingoHubSDKError.apiError(statusCode: 0, message: "Failed to install bundle: \(error.localizedDescription)", errorCodes: [])
         }
-        try fileManager.createDirectory(at: destinationURL, withIntermediateDirectories: true, attributes: nil)
-        try fileManager.removeItem(at: destinationURL)
-        try fileManager.unzipItem(at: url, to: destinationURL)
 
         // Downloaded translations are re-downloadable, keep them out of device backups
-        if let folderUrl = cacheManager.updateBundleFolderUrl {
-            cacheManager.excludeFromBackup(folderUrl)
+        cacheManager.excludeFromBackup(folderURL)
+
+        guard cacheManager.activate(bundleURL: liveBundleURL, distributionVersion: identifier, appVersion: appVersion) else {
+            throw LingoHubSDKError.apiError(statusCode: 0, message: "Installed bundle could not be opened", errorCodes: [])
         }
 
         UserDefaults.standard.set(identifier, forKey: LingoHubConstants.distributionVersion)
         UserDefaults.standard.set(appVersion, forKey: LingoHubConstants.appVersion)
-        NotificationCenter.default.post(name: .LingoHubDidUpdateLocalization, object: nil)
 
-        // Clear the cache now that the bundle is updated
-        cacheManager.clearCache()
-       LingoHubLogger.shared.log("Localization cache cleared after update.")
+        // The snapshot swap above already cleared all caches, so observers that read
+        // localized strings synchronously get content from the new release.
+        NotificationCenter.default.post(name: .LingoHubDidUpdateLocalization, object: nil)
+        LingoHubLogger.shared.log("Bundle successfully updated to release \(identifier)")
     }
 }
 
@@ -430,16 +414,15 @@ extension LingoHubSDK {
         UserDefaults.standard.removeObject(forKey: LingoHubConstants.appVersion)
         UserDefaults.standard.removeObject(forKey: LingoHubConstants.usageCooldownUntil)
 
+        cacheManager.deactivate()
+
         // Use cache manager to get the folder URL for cleanup
         if let folderUrl = cacheManager.updateBundleFolderUrl {
-           LingoHubLogger.shared.log("Cleaning up update bundle folder at \(folderUrl.path)")
+            LingoHubLogger.shared.log("Cleaning up update bundle folder at \(folderUrl.path)")
             try? FileManager.default.removeItem(at: folderUrl)
         } else {
-           LingoHubLogger.shared.log("Could not determine update bundle folder URL for cleanup.")
+            LingoHubLogger.shared.log("Could not determine update bundle folder URL for cleanup.")
         }
-
-        // Also clear the cache
-        cacheManager.clearCache()
     }
 
     /// Format a DecodingError into a user-friendly error message

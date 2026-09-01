@@ -8,7 +8,7 @@
 import Foundation
 
 extension APIClient {
-    func checkForUpdates(apiKey: String, appVersion: String, sdkVersion: String, distributionVersion: String?, environment: Environment, deviceIdentifier: String?, languageCode: String?, completion: @escaping (() throws -> BundleInfo) -> Void) {
+    func checkForUpdates(apiKey: String, appVersion: String, sdkVersion: String, distributionVersion: String?, environment: Environment, deviceIdentifier: String?, languageCode: String?) async throws -> BundleInfo {
 
         // Parameters according to https://developers.lingohub.com/reference/cdncheck
         var parameters: [String: Any] = [
@@ -27,8 +27,6 @@ extension APIClient {
             parameters["clientLanguageCode"] = languageCode
         }
 
-        LingoHubLogger.shared.log("API request parameters: \(parameters)")
-
         // Set up headers with content-type, accept, and bearer token
         let headers: [String: String] = [
             "Content-Type": "application/json",
@@ -36,22 +34,7 @@ extension APIClient {
             "Authorization": "Bearer \(apiKey)"
         ]
 
-        let path = "v1/distributions/check"
-        LingoHubLogger.shared.log("API request path: \(path)")
-
-        let endpoint = Endpoint<BundleInfo>(method: .post, path: path, parameters: parameters, headers: headers)
-        LingoHubLogger.shared.log("Sending API request")
-
-        request(endpoint: endpoint) { response in
-            LingoHubLogger.shared.log("Received API response")
-            do {
-                let bundleInfo = try response()
-                LingoHubLogger.shared.log("Successfully parsed BundleInfo: id=\(bundleInfo.id), name=\(bundleInfo.name), filesUrl=\(bundleInfo.filesUrl.absoluteString)")
-                completion { return bundleInfo }
-            } catch {
-                LingoHubLogger.shared.log("Error in API response: \(error)")
-                completion { throw error }
-            }
-        }
+        let endpoint = Endpoint<BundleInfo>(method: .post, path: "v1/distributions/check", parameters: parameters, headers: headers)
+        return try await send(endpoint: endpoint)
     }
 }

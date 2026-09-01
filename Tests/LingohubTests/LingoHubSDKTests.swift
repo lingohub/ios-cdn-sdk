@@ -544,10 +544,11 @@ final class LingoHubSDKTests: XCTestCase {
 
         // When/Then
         do {
-            try sut.useUpdatedBundle(atURL: TestConstants.updateBundleURL, withIdentifier: LingoHubConstants.distributionVersion, appVersion: TestConstants.appVersion)
-            XCTAssertEqual(sut.distributionVersion, LingoHubConstants.distributionVersion)
+            try await sut.installArchive(at: TestConstants.updateBundleURL, identifier: TestConstants.bundleIdentifier, appVersion: TestConstants.appVersion)
+            XCTAssertEqual(sut.distributionVersion, TestConstants.bundleIdentifier)
+            XCTAssertTrue(sut.isUpdatedBundleUsed)
         } catch {
-            XCTFail()
+            XCTFail("\(error)")
         }
     }
 
@@ -582,7 +583,7 @@ final class LingoHubSDKTests: XCTestCase {
         XCTAssertNil(stringBefore)
 
         // When
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
         sut.swizzleBundle(Bundle.module)
         let stringAfter = sut.localizedString(forKey: "StringPlain")
 
@@ -595,7 +596,7 @@ final class LingoHubSDKTests: XCTestCase {
         sut.setLanguage("en") // independent of the host's system language
         XCTAssertEqual(sut.swizzledBundles.count, 0)
 
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
 
         // Unswizzled lookups resolve via the system mechanism, so the expected value
         // depends on which localization the test bundle picks for this host.
@@ -618,7 +619,7 @@ final class LingoHubSDKTests: XCTestCase {
     func testAddedString() async throws {
         sut.configureForTests()
         sut.setLanguage("en") // independent of the host's system language
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
 
         let stringBefore = String.localized("OtherString", tableName: "Other")
 
@@ -633,7 +634,7 @@ final class LingoHubSDKTests: XCTestCase {
         // Given
         sut.configureForTests()
         sut.setLanguage("en") // independent of the host's system language
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
         // Remove swizzling of Bundle.module
         // sut.swizzleBundle(Bundle.module)
 
@@ -650,7 +651,7 @@ final class LingoHubSDKTests: XCTestCase {
     func testLanguage() async throws {
         // Given
         sut.configureForTests()
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
         sut.swizzleBundle(Bundle.module)
 
         // Debug bundle resources
@@ -687,7 +688,7 @@ final class LingoHubSDKTests: XCTestCase {
         // Given
         sut.configureForTests()
         sut.setLanguage("en")
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
         sut.swizzleBundle(Bundle.module)
 
         // When: hammer the swizzled lookup from many threads at once

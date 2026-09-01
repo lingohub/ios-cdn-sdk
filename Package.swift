@@ -31,7 +31,7 @@ let package = Package(
             ]),
         .testTarget(
             name: "LingohubTests",
-            dependencies: ["Lingohub", "Mocker"],
+            dependencies: ["Lingohub", "Mocker", "ZIPFoundation"],
             resources: [
                 .process("Resources/empty.json"),
                 .process("Resources/update_200.json"),

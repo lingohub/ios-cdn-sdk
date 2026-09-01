@@ -7,7 +7,10 @@
 
 import Foundation
 
-final class APIClient {
+/// Async HTTP client for the LingoHub CDN. Its methods are nonisolated async, so
+/// networking and file handling run off the caller's actor (in particular, off the
+/// main actor the SDK facade lives on).
+final class APIClient: APIClientProtocol {
     private let basePath: String
     private let session: URLSession
 
@@ -21,283 +24,126 @@ final class APIClient {
 }
 
 extension APIClient {
-    func request<Response>(endpoint: Endpoint<Response>, completion: @escaping (() throws -> Response) -> Void) {
-        LingoHubLogger.shared.log("Creating URL request for endpoint: \(endpoint.path)")
-
+    func send<Response>(endpoint: Endpoint<Response>) async throws -> Response {
         guard let request = urlRequest(method: endpoint.method, path: endpoint.path, parameters: endpoint.parameters, headers: endpoint.headers) else {
-            LingoHubLogger.shared.log("Failed to create URL request")
-            DispatchQueue.main.async {
-                completion { throw APIError.invalidURL }
-            }
-            return
+            LingoHubLogger.shared.log("Failed to create URL request for path: \(endpoint.path)")
+            throw APIError.invalidURL
         }
 
-        LingoHubLogger.shared.log("Created URL request: \(request.url?.absoluteString ?? "nil")")
-        LingoHubLogger.shared.log("Request method: \(request.httpMethod ?? "nil")")
+        LingoHubLogger.shared.log("Sending \(endpoint.method.rawValue) request to: \(request.url?.absoluteString ?? "nil")")
 
-        let task = session.dataTask(with: request) { data, response, error in
-            LingoHubLogger.shared.log("Received response for URL: \(request.url?.absoluteString ?? "nil")")
+        let (data, response) = try await session.data(for: request)
 
-            if let error = error {
-                LingoHubLogger.shared.log("Network error: \(error.localizedDescription)")
-                completion { throw error }
-                return
-            }
+        guard let httpResponse = response as? HTTPURLResponse else {
+            LingoHubLogger.shared.log("Invalid response type: \(String(describing: response))")
+            throw APIError.invalidResponse
+        }
 
-            guard let httpResponse = response as? HTTPURLResponse else {
-                LingoHubLogger.shared.log("Invalid response type: \(String(describing: response))")
-                completion { throw APIError.invalidResponse }
-                return
-            }
+        LingoHubLogger.shared.log("Response status code: \(httpResponse.statusCode), \(data.count) bytes")
 
-            LingoHubLogger.shared.log("Response status code: \(httpResponse.statusCode)")
-            LingoHubLogger.shared.log("Response headers: \(httpResponse.allHeaderFields)")
-
+        switch httpResponse.statusCode {
+        case 200:
             do {
-                guard let data = data, let statusCode = (response as? HTTPURLResponse)?.statusCode else {
-                    LingoHubLogger.shared.log("No data or status code in response")
-                    throw APIError.invalidResponse
-                }
-
-                LingoHubLogger.shared.log("Response data size: \(data.count) bytes")
-
-                // Print a preview of the response data if it's not too large
-                if let jsonString = String(data: data, encoding: .utf8) {
-                    let truncatedString = String(jsonString.prefix(1000))
-                    LingoHubLogger.shared.log("Response data: \(truncatedString)")
-                }
-
-                switch statusCode {
-                case 200:
-                    LingoHubLogger.shared.log("Successful response (200)")
-                    do {
-                        let response = try endpoint.decode(data)
-                        LingoHubLogger.shared.log("Successfully decoded response")
-                        completion { return response }
-                    } catch {
-                        LingoHubLogger.shared.log("Failed to decode response: \(error)")
-                        throw error
-                    }
-                case 204:
-                    LingoHubLogger.shared.log("No content response (204)")
-                    throw APIError.noContent
-                default:
-                    LingoHubLogger.shared.log("Error response (\(statusCode))")
-                    var message: String?
-                    var infos: [String] = []
-                    if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
-                        message = errorResponse.message
-                        infos = errorResponse.infos
-                        LingoHubLogger.shared.log("Error message: \(message ?? "nil")")
-                    } else if let jsonString = String(data: data, encoding: .utf8) {
-                        LingoHubLogger.shared.log("Raw error response: \(jsonString)")
-                    }
-                    throw APIError.apiError(statusCode: statusCode, message: message, infos: infos)
-                }
+                return try endpoint.decode(data)
             } catch {
-                LingoHubLogger.shared.log("Error processing response: \(error)")
-                completion { throw error }
+                LingoHubLogger.shared.log("Failed to decode response: \(error)")
+                throw error
             }
+        case 204:
+            LingoHubLogger.shared.log("No content response (204)")
+            throw APIError.noContent
+        default:
+            LingoHubLogger.shared.log("Error response (\(httpResponse.statusCode))")
+            var message: String?
+            var infos: [String] = []
+            if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
+                message = errorResponse.message
+                infos = errorResponse.infos
+                LingoHubLogger.shared.log("Error message: \(message ?? "nil")")
+            }
+            throw APIError.apiError(statusCode: httpResponse.statusCode, message: message, infos: infos)
         }
-
-        LingoHubLogger.shared.log("Starting network request")
-        task.resume()
     }
 
-
     private func urlRequest(method: HTTPMethod, path: String, parameters: [String: Any], headers: [String: String]) -> URLRequest? {
-        LingoHubLogger.shared.log("Creating URL request for path: \(path)")
-
         var basePath = self.basePath + path
-        if (path.starts(with: "https://")) { // absolute https URLs are used as-is
+        if path.starts(with: "https://") { // absolute https URLs are used as-is
             basePath = path
-            LingoHubLogger.shared.log("Using absolute path: \(basePath)")
-        } else {
-            LingoHubLogger.shared.log("Using relative path: \(basePath)")
         }
 
-        LingoHubLogger.shared.log("Creating URL components from: \(basePath)")
         var components = URLComponents(string: basePath)
 
-        if components == nil {
-            LingoHubLogger.shared.log("Failed to create URL components from: \(basePath)")
-        }
-
         if method == .get, !parameters.isEmpty {
-            LingoHubLogger.shared.log("Adding query parameters for GET request")
             components?.queryItems = parameters.compactMap { (key, value) in
                 let stringValue = "\(value)"
                 if stringValue.isEmpty {
-                    LingoHubLogger.shared.log("Skipping empty parameter: \(key)")
                     return nil
                 }
-                LingoHubLogger.shared.log("Adding query parameter: \(key)=\(stringValue)")
                 return URLQueryItem(name: key, value: stringValue)
             }
         }
 
         guard let url = components?.url else {
-            LingoHubLogger.shared.log("Failed to create URL from components")
+            LingoHubLogger.shared.log("Failed to create URL from: \(basePath)")
             return nil
         }
 
-        LingoHubLogger.shared.log("Created URL: \(url.absoluteString)")
-
         var request = URLRequest(url: url)
         request.httpMethod = method.rawValue
-        LingoHubLogger.shared.log("Set HTTP method: \(method.rawValue)")
 
         if method != .get, !parameters.isEmpty {
-            LingoHubLogger.shared.log("Adding body parameters for \(method.rawValue) request")
             do {
                 let data = try JSONSerialization.data(withJSONObject: parameters, options: [])
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.httpBody = data
-
-                if let bodyString = String(data: data, encoding: .utf8) {
-                    LingoHubLogger.shared.log("Request body: \(bodyString)")
-                }
             } catch {
                 LingoHubLogger.shared.log("Failed to serialize request body: \(error)")
             }
         }
 
-        if !headers.isEmpty {
-            headers.forEach { key, value in
-                request.setValue(value, forHTTPHeaderField: key)
-            }
-        }
-
-        // Debug information
-        LingoHubLogger.shared.log("Final request URL: \(url.absoluteString)")
-
-        if let body = request.httpBody, let bodyString = String(data: body, encoding: .utf8) {
-            LingoHubLogger.shared.log("Final request body: \(bodyString)")
+        headers.forEach { key, value in
+            request.setValue(value, forHTTPHeaderField: key)
         }
 
         return request
     }
 }
 
-
-/// Extension for download-related API endpoints
+/// Download support
 extension APIClient {
-    /// Download a file
-    /// - Parameters:
-    ///   - url: The URL to download from
-    ///   - completion: The completion handler
-
-    func download(url: URL, completion: @escaping (() throws -> URL) -> Void) {
+    /// Downloads a file and moves it to a location the SDK controls.
+    /// - Returns: The URL of the downloaded file; the caller deletes it when done.
+    func download(from url: URL) async throws -> URL {
         LingoHubLogger.shared.log("Starting download from URL: \(url.absoluteString)")
-        let request = URLRequest(url: url)
-        // For file downloads, we don't need to set Accept to application/json
-        // as we're expecting binary data
 
-        LingoHubLogger.shared.log("Download request created with URL: \(url.absoluteString)")
-        LingoHubLogger.shared.log("Download request headers: \(request.allHTTPHeaderFields ?? [:])")
+        let (temporaryURL, response) = try await session.download(for: URLRequest(url: url))
 
-        let task = session.downloadTask(with: request) { temporaryURL, response, error in
-            LingoHubLogger.shared.log("Download task completed")
-
-            do {
-                if let error = error {
-                    LingoHubLogger.shared.log("Download error: \(error.localizedDescription)")
-                    LingoHubLogger.shared.log("Error details: \(error)")
-                    throw error
-                }
-
-                guard let temporaryURL = temporaryURL else {
-                    LingoHubLogger.shared.log("Download failed: No temporary URL returned")
-                    throw APIError.invalidResponse
-                }
-                LingoHubLogger.shared.log("Temporary URL received: \(temporaryURL.path)")
-
-                guard let httpResponse = response as? HTTPURLResponse else {
-                    LingoHubLogger.shared.log("Download failed: Invalid response type: \(String(describing: response))")
-                    throw APIError.invalidResponse
-                }
-
-                let statusCode = httpResponse.statusCode
-                LingoHubLogger.shared.log("Download completed with status code: \(statusCode)")
-                LingoHubLogger.shared.log("Response headers: \(httpResponse.allHeaderFields)")
-
-                switch statusCode {
-                case 200:
-                    // Create a copy of the temporary file in a location we control
-                    // This is necessary because the system will delete the temporary file
-                    // as soon as this completion handler returns
-                    let fileManager = FileManager.default
-                    let tempDir = fileManager.temporaryDirectory
-                    let destinationURL = tempDir.appendingPathComponent(UUID().uuidString + ".zip")
-
-                    LingoHubLogger.shared.log("Copying temporary file from \(temporaryURL.path) to \(destinationURL.path)")
-
-                    // Check if source file exists and get its size
-                    if fileManager.fileExists(atPath: temporaryURL.path) {
-                        do {
-                            let attributes = try fileManager.attributesOfItem(atPath: temporaryURL.path)
-                            if let fileSize = attributes[.size] as? UInt64 {
-                                LingoHubLogger.shared.log("Temporary file size: \(fileSize) bytes")
-                                if fileSize == 0 {
-                                    LingoHubLogger.shared.log("Warning: Temporary file has zero size!")
-                                }
-                            }
-                        } catch {
-                            LingoHubLogger.shared.log("Could not get temporary file attributes: \(error)")
-                        }
-                    } else {
-                        LingoHubLogger.shared.log("Warning: Temporary file does not exist at path: \(temporaryURL.path)")
-                    }
-
-                    try fileManager.copyItem(at: temporaryURL, to: destinationURL)
-
-                    // Verify the file was copied successfully
-                    guard fileManager.fileExists(atPath: destinationURL.path) else {
-                        LingoHubLogger.shared.log("Failed to copy temporary file")
-                        throw APIError.invalidResponse
-                    }
-
-                    // Check destination file size
-                    do {
-                        let attributes = try fileManager.attributesOfItem(atPath: destinationURL.path)
-                        if let fileSize = attributes[.size] as? UInt64 {
-                            LingoHubLogger.shared.log("Destination file size: \(fileSize) bytes")
-                            if fileSize == 0 {
-                                LingoHubLogger.shared.log("Warning: Destination file has zero size!")
-                            }
-                        }
-                    } catch {
-                        LingoHubLogger.shared.log("Could not get destination file attributes: \(error)")
-                    }
-
-                    LingoHubLogger.shared.log("File copied successfully")
-                    completion { return destinationURL }
-                default:
-                    var message: String?
-                    var infos: [String] = []
-                    if let errorData = try? Data(contentsOf: temporaryURL),
-                       let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: errorData) {
-                        message = errorResponse.message
-                        infos = errorResponse.infos
-                    }
-                    LingoHubLogger.shared.log("Download failed with status code: \(statusCode), message: \(message ?? "None")")
-
-                    // Try to read the response body for more details
-                    if let errorData = try? Data(contentsOf: temporaryURL),
-                       let responseString = String(data: errorData, encoding: .utf8) {
-                        LingoHubLogger.shared.log("Error response body: \(responseString)")
-                    }
-
-                    throw APIError.apiError(statusCode: statusCode, message: message, infos: infos)
-                }
-            } catch {
-                LingoHubLogger.shared.log("Download completion handler error: \(error)")
-                completion { throw error }
-            }
+        guard let httpResponse = response as? HTTPURLResponse else {
+            LingoHubLogger.shared.log("Download failed: Invalid response type: \(String(describing: response))")
+            throw APIError.invalidResponse
         }
 
-        LingoHubLogger.shared.log("Starting download task")
-        task.resume()
+        LingoHubLogger.shared.log("Download completed with status code: \(httpResponse.statusCode)")
+
+        switch httpResponse.statusCode {
+        case 200:
+            // Move the system temporary file to a location we control before it is
+            // cleaned up from under us.
+            let fileManager = FileManager.default
+            let destinationURL = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".zip")
+            try fileManager.moveItem(at: temporaryURL, to: destinationURL)
+            LingoHubLogger.shared.log("Download stored at: \(destinationURL.path)")
+            return destinationURL
+        default:
+            var message: String?
+            var infos: [String] = []
+            if let errorData = try? Data(contentsOf: temporaryURL),
+               let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: errorData) {
+                message = errorResponse.message
+                infos = errorResponse.infos
+            }
+            LingoHubLogger.shared.log("Download failed with status code: \(httpResponse.statusCode), message: \(message ?? "None")")
+            throw APIError.apiError(statusCode: httpResponse.statusCode, message: message, infos: infos)
+        }
     }
 }
-
