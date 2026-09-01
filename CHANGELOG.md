@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [2.0.0] - 2026-09-01
+
+2.0 is a reliability release: translation updates now install transactionally — a corrupt download, a full disk, or a crash mid-install can never break the translations your users are seeing — and all heavy work moved off the main thread. The public API was reduced to the surface that was always documented.
+
+### Breaking
+- Minimum platforms raised to **iOS 15** and **macOS 12** (enables the native async `URLSession` APIs the rewritten networking uses).
+- The deprecated 1.0.0 type aliases (`LingohubSDK`, `LingohubSDKError`, `.LingohubDidUpdateLocalization`) are removed. Use the LingoHub-spelled names introduced in 1.1.0. `import Lingohub`, persisted keys, and storage locations are unchanged; downloaded translations survive the upgrade.
+- Implementation details that were unintentionally public are now internal: `checkForUpdate(result:)`, `downloadUpdate(...)`, `useUpdatedBundle(...)`, `updateBundleExists`, `BundleInfo`, and `HTTPMethod`. Use `update(result:)` / `updateAsync()` — both drive the complete check → download → install cycle.
+- Setting the `language` property now behaves exactly like `setLanguage(_:)` / `setSystemLanguage()`: a non-nil value is persisted, `nil` removes the persisted override. (Previously the setter changed the served language without persisting it.)
+
+### Changed
+- Release installation is transactional: archives are extracted into a staging directory, validated (at least one `.lproj` required, and every `.strings`/`.stringsdict` must parse), then activated with an atomic filesystem swap. At every point in time the installed bundle is either the complete previous release or the complete new one.
+- `configure` heals leftovers from interrupted installs: stale staging directories are removed, metadata pointing at a missing or unusable bundle is cleared, and an unreferenced bundle is deleted.
+- Extraction, validation, and checksum hashing run off the main thread; installing an update no longer blocks animations or input.
+- Concurrent `update()`/`updateAsync()` calls share a single in-flight cycle — one network round-trip, one install, the same result for every caller. Closure callbacks are always delivered on the main queue.
+- Download hardening: release archives are rejected when oversized (50 MB compressed, 200 MB uncompressed, 10,000 entries), when containing unsafe entry paths or symlinks, or when failing checksum verification; non-HTTPS download URLs are refused.
+- Localization lookups got cheaper: the active release is an immutable in-memory snapshot, so the hot path no longer checks the filesystem or reads UserDefaults on every `NSLocalizedString` call; per-language bundles are cached; log messages are only constructed when logging is enabled.
+
+### Fixed
+- `language` honors its documented contract again: it stays `nil` after `configure` unless an override was set. (1.x populated it with the system language on configure, making "override" and "system default" indistinguishable.)
+- The update notification is posted only after the new release is fully active, so observers that read localized strings synchronously always see the new translations. (Previously they could read the previous release's cached values.)
+- A caller-supplied `value:` fallback no longer shadows the app bundle's own translation when a key is missing from the downloaded release.
+- A malformed 200 response without a download URL now surfaces as a decoding error instead of being silently patched over (`BundleInfo` decodes strictly; the unused `createdAt` field was dropped).
+- The demo app no longer accumulates notification observers on repeated appearances, and it demonstrates the README's update-throttling guidance.
+
+### Added
+- Archive integrity verification: when the CDN response includes `filesSha256`, the downloaded archive is verified against it before installation.
+- CI: the test suite now also runs on an iOS simulator; a public-API diff job flags breaking changes on pull requests; a non-blocking Swift 6 language-mode job tracks the ZIPFoundation migration.
+
+### Internal
+- `APIClient` rewritten with async/await behind an injectable `APIClientProtocol`; downloaded files are moved instead of copied.
+- 25 new tests (57 total): corrupt/malformed/oversized archives each preserving the previous release, crash healing, update coalescing, notification ordering, lookup consistency while releases are swapped, and checksum verification.
+
 ## [1.1.0] - 2026-09-01
 
 ### Changed (naming)

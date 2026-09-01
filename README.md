@@ -2,7 +2,7 @@
 
 [![Release](https://img.shields.io/github/v/release/lingohub/ios-cdn-sdk?style=flat-square)](https://github.com/lingohub/ios-cdn-sdk/releases)
 [![License](https://img.shields.io/github/license/lingohub/ios-cdn-sdk?style=flat-square)](./LICENSE)
-[![Platform](https://img.shields.io/badge/platform-iOS%2014%2B-blue?style=flat-square)](#requirements)
+[![Platform](https://img.shields.io/badge/platform-iOS%2015%2B-blue?style=flat-square)](#requirements)
 
 A Swift SDK for over-the-air (OTA) localization with [LingoHub](https://lingohub.com). Update your app's translations without releasing a new app version.
 
@@ -11,6 +11,7 @@ A Swift SDK for over-the-air (OTA) localization with [LingoHub](https://lingohub
 ## Features
 
 * 🚀 Over-the-air localization updates via the LingoHub CDN
+* 🛡 Transactional installs — a corrupt download, full disk, or crash mid-update never breaks active translations
 * 🔄 Runtime language switching, persisted across launches
 * 📱 Works with `.strings`, `.stringsdict`, and String Catalog (`.xcstrings`) projects
 * 🛠 Seamless integration — keep using `NSLocalizedString(...)` as usual, from any thread
@@ -30,10 +31,10 @@ If nothing has been published yet for your app version and environment, the SDK 
 
 ## Requirements
 
-* iOS 14.0+
+* iOS 15.0+ / macOS 12.0+
 * Swift 5.9+ / Xcode 15+
 
-> The SwiftUI snippets below use the two-parameter `onChange(of:)`, which requires iOS 17. On iOS 14–16, use the single-parameter variant as noted.
+> The SwiftUI snippets below use the two-parameter `onChange(of:)`, which requires iOS 17. On iOS 15–16, use the single-parameter variant as noted.
 
 ## Installation
 
@@ -47,21 +48,19 @@ Or add it to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/lingohub/ios-cdn-sdk.git", from: "1.1.0")
+    .package(url: "https://github.com/lingohub/ios-cdn-sdk.git", from: "2.0.0")
 ]
 ```
 
-> **Upgrading from 1.0.0?** The public API was renamed to the LingoHub brand spelling in 1.1.0:
+> **Upgrading from 1.x?** Most integrations that use the documented API (`configure`, `swizzleMainBundle`, `update`/`updateAsync`, `setLanguage`) compile unchanged. What changed in 2.0:
 >
-> | Old (1.0.0)                     | New                             |
-> | ------------------------------- | ------------------------------- |
-> | `LingohubSDK`                   | `LingoHubSDK`                   |
-> | `LingohubSDKError`              | `LingoHubSDKError`              |
-> | `.LingohubDidUpdateLocalization`| `.LingoHubDidUpdateLocalization`|
+> * **Platforms** — the minimum is now iOS 15 / macOS 12.
+> * **1.0.0 type names removed** — the deprecated aliases `LingohubSDK`, `LingohubSDKError`, and `.LingohubDidUpdateLocalization` are gone; use the LingoHub spelling (`LingoHubSDK`, `LingoHubSDKError`, `.LingoHubDidUpdateLocalization`). The module name is unchanged (`import Lingohub`).
+> * **Internalized symbols** — `checkForUpdate(result:)`, `downloadUpdate(...)`, `useUpdatedBundle(...)`, `updateBundleExists`, `BundleInfo`, and `HTTPMethod` were implementation details and are no longer public. `update(result:)` / `updateAsync()` cover the complete cycle.
+> * **`language` setter** — assigning the property now behaves exactly like `setLanguage(_:)` / `setSystemLanguage()`: the override is persisted, `nil` removes it.
+> * Coming from **1.0.0**: also see the 1.1.0 notes in the [changelog](CHANGELOG.md) (`.apiError` gained an `errorCodes` associated value).
 >
-> Deprecated aliases for the old type names are included, so they keep compiling with warnings — update at your own pace. The module name is unchanged (`import Lingohub`), and downloaded translations and settings migrate automatically.
->
-> One pattern needs a manual update: `.apiError` gained a third associated value. Change `case .apiError(let statusCode, let message)` to `case .apiError(let statusCode, let message, let errorCodes)` (or `, _` if you don't need the codes). The same applies if you construct `.apiError` values yourself (e.g. in tests): add `errorCodes: []`.
+> Downloaded translations and settings migrate automatically; no user-visible state is lost.
 
 ## Get your API key
 
@@ -107,7 +106,7 @@ struct YourApp: App {
 
 > Note: the SDK exports its own `Environment` type, so the SwiftUI property wrapper needs to be written as `@SwiftUI.Environment`.
 >
-> On iOS 14–16, use the single-parameter `onChange`: `.onChange(of: scenePhase) { newPhase in ... }`
+> On iOS 15–16, use the single-parameter `onChange`: `.onChange(of: scenePhase) { newPhase in ... }`
 
 ### UIKit
 
@@ -138,7 +137,7 @@ With swizzling enabled, keep using `NSLocalizedString` — the SDK serves the up
 NSLocalizedString("welcome_message", comment: "Welcome message")
 ```
 
-Swizzling is what routes lookups through LingoHub. Without `swizzleMainBundle()`, your app keeps showing the strings packaged in the app bundle — downloaded translations are never applied (unless you use the [manual API](#manual-localization)).
+Swizzling is what routes lookups through LingoHub. Without `swizzleMainBundle()`, your app keeps showing the strings packaged in the app bundle — downloaded translations are never applied (unless you use the [manual API](#manual-localization)). Once enabled, swizzling stays active for the lifetime of the process; there is no API to disable it at runtime. While no downloaded release is active, swizzled lookups take the original code path unchanged.
 
 #### File formats
 
@@ -203,7 +202,7 @@ struct ContentView: View {
 }
 ```
 
-`LingoHubSDK.shared.currentLanguageCode` returns the language currently being served (the override, or the system language when none is set) — use it to initialize that state. `LingoHubSDK.shared.language` is the override only and is `nil` when the SDK follows the system language.
+`LingoHubSDK.shared.currentLanguageCode` returns the language currently being served (the override, or the system language when none is set) — use it to initialize that state. `LingoHubSDK.shared.language` is the override only and is `nil` when the SDK follows the system language; assigning it behaves exactly like calling `setLanguage(_:)` (persisted) or, with `nil`, `setSystemLanguage()`.
 
 ### Manual localization
 
@@ -222,7 +221,7 @@ The manual API reads `.strings` files only; `.stringsdict` plurals need the swiz
 
 ### Update notifications
 
-Via `NotificationCenter` — posted after a new translation bundle has been downloaded and is active:
+Via `NotificationCenter` — posted after a new translation bundle has been downloaded and is fully active. Strings read from an observer (even one running synchronously) already resolve against the new release:
 
 ```swift
 NotificationCenter.default.addObserver(
@@ -249,7 +248,7 @@ LingoHubSDK.shared.update { result in
 }
 ```
 
-Callbacks are delivered on the main queue.
+Callbacks are delivered on the main queue. Concurrent `update()`/`updateAsync()` calls (for example, a manual refresh racing a foreground-transition check) share a single update cycle — one network request, one install — and every caller receives the same result.
 
 Or with async/await:
 
