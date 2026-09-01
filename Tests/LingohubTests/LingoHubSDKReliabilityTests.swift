@@ -20,16 +20,35 @@ private final class CapturedValue<T>: @unchecked Sendable {
     }
 }
 
-/// An `APIClientProtocol` fake that counts check calls and reports "nothing new",
-/// slowly - so concurrent update calls can pile up on one in-flight cycle.
-private final class CountingAPIClient: APIClientProtocol, @unchecked Sendable {
+/// An `APIClientProtocol` fake whose check call blocks on a test-controlled gate,
+/// so tests can hold an update cycle provably in flight - no sleep choreography,
+/// no dependence on runner speed. Reports "nothing new" once the gate opens.
+private final class GatedAPIClient: APIClientProtocol, @unchecked Sendable {
     private let lock = NSLock()
     private var _checkCount = 0
     var checkCount: Int { lock.lh_withLock { _checkCount } }
 
+    /// Fulfilled when a check call has started (and is blocked at the gate).
+    let checkStarted: XCTestExpectation
+    private let gate: AsyncStream<Void>
+    private let gateContinuation: AsyncStream<Void>.Continuation
+
+    init() {
+        let started = XCTestExpectation(description: "check started")
+        started.assertForOverFulfill = false
+        checkStarted = started
+        var continuation: AsyncStream<Void>.Continuation!
+        gate = AsyncStream { continuation = $0 }
+        gateContinuation = continuation
+    }
+
+    /// Lets the blocked check finish; later checks pass straight through.
+    func releaseGate() { gateContinuation.finish() }
+
     func checkForUpdates(apiKey: String, appVersion: String, sdkVersion: String, distributionVersion: String?, environment: Environment, deviceIdentifier: String?, languageCode: String?) async throws -> BundleInfo {
         lock.lh_withLock { _checkCount += 1 }
-        try? await Task.sleep(nanoseconds: 100_000_000)
+        checkStarted.fulfill()
+        for await _ in gate {}
         throw APIError.noContent
     }
 
@@ -154,21 +173,27 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
 
     func testConcurrentUpdatesShareOneCycle() async throws {
         sut.configureForTests()
-        let counting = CountingAPIClient()
-        sut.apiClient = counting
+        let gated = GatedAPIClient()
+        sut.apiClient = gated
 
-        async let first: Bool = sut.updateAsync()
-        async let second: Bool = sut.updateAsync()
-        let (firstResult, secondResult) = try await (first, second)
+        let first = Task { try await sut.updateAsync() }
+        // The cycle is provably in flight and blocked at the gate
+        await fulfillment(of: [gated.checkStarted], timeout: 5)
+        let second = Task { try await sut.updateAsync() }
+        // Let `second` run its synchronous prelude on the main actor and join
+        await Task.yield()
+        gated.releaseGate()
 
+        let firstResult = try await first.value
+        let secondResult = try await second.value
         XCTAssertFalse(firstResult)
         XCTAssertFalse(secondResult)
-        XCTAssertEqual(counting.checkCount, 1, "Concurrent update calls must share one network round-trip")
+        XCTAssertEqual(gated.checkCount, 1, "Concurrent update calls must share one network round-trip")
 
-        // A later call starts a fresh cycle
+        // A later call starts a fresh cycle (the gate stays open)
         let thirdResult = try await sut.updateAsync()
         XCTAssertFalse(thirdResult)
-        XCTAssertEqual(counting.checkCount, 2)
+        XCTAssertEqual(gated.checkCount, 2)
     }
 
     // MARK: - Notification ordering
@@ -249,28 +274,31 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
 
     func testCancelledWaiterThrowsCancellationErrorWithoutAbortingCycle() async throws {
         sut.configureForTests()
-        let counting = CountingAPIClient()
-        sut.apiClient = counting
+        let gated = GatedAPIClient()
+        sut.apiClient = gated
 
         let first = Task { try await sut.updateAsync() }
-        // Let the shared cycle start, then join it and cancel the joined waiter mid-flight
-        try await Task.sleep(nanoseconds: 20_000_000)
+        // The cycle is provably in flight and blocked at the gate - it cannot
+        // complete before the cancellation below, on any runner speed.
+        await fulfillment(of: [gated.checkStarted], timeout: 5)
         let waiter = Task { try await sut.updateAsync() }
-        try await Task.sleep(nanoseconds: 10_000_000)
+        await Task.yield()
         waiter.cancel()
+        gated.releaseGate()
 
         do {
             _ = try await waiter.value
             XCTFail("Expected CancellationError")
         } catch is CancellationError {
             // Documented contract: a cancelled caller throws CancellationError no
-            // later than when the shared cycle finishes.
+            // later than when the shared cycle finishes. (Whether the waiter had
+            // already joined or was cancelled on entry, it must not surface a result.)
         }
 
         // The shared cycle itself was not aborted by the waiter's cancellation
         let firstResult = try await first.value
         XCTAssertFalse(firstResult)
-        XCTAssertEqual(counting.checkCount, 1)
+        XCTAssertEqual(gated.checkCount, 1)
     }
 
     // MARK: - Transfer policy
