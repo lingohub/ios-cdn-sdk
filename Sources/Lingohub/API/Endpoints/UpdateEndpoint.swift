@@ -1,5 +1,5 @@
 //
-//  API.swift
+//  UpdateEndpoint.swift
 //
 //
 //  Created by Manfred Baldauf on 12.03.25.
@@ -8,16 +8,14 @@
 import Foundation
 
 extension APIClient {
-    func checkForUpdates(apiKey: String, appVersion: String, sdkVersion: String, distributionVersion: String?, environment: Environment, deviceIdentifier: String?, completion: @escaping (() throws -> BundleInfo) -> Void) {
+    func checkForUpdates(apiKey: String, appVersion: String, sdkVersion: String, distributionVersion: String?, environment: Environment, deviceIdentifier: String?, languageCode: String?, completion: @escaping (() throws -> BundleInfo) -> Void) {
 
-        let appLanguage = Locale.current.languageCode
-
-        // Parameters according to https://docs.lingohub.com/reference/cdncheck
+        // Parameters according to https://developers.lingohub.com/reference/cdncheck
         var parameters: [String: Any] = [
             "distributionType": "MOBILE_SDK_IOS",
             "distributionEnvironment": environment.rawValue,
             "clientVersion": appVersion,
-            "clientUser": deviceIdentifier ??  NSUUID().uuidString,
+            "clientUser": deviceIdentifier ?? UUID().uuidString,
             "clientAgent": "Lingohub-iOS-SDK/\(sdkVersion)"
         ]
 
@@ -25,8 +23,8 @@ extension APIClient {
             parameters["clientRelease"] = distributionVersion
         }
 
-        if let appLanguage = appLanguage {
-            parameters["clientLanguage"] = appLanguage
+        if let languageCode = languageCode {
+            parameters["clientLanguageCode"] = languageCode
         }
 
         LingohubLogger.shared.log("API request parameters: \(parameters)")

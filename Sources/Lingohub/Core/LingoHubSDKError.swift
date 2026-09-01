@@ -11,7 +11,7 @@ import Foundation
  The error type returned by Lingohub
  */
 public enum LingohubSDKError: Error {
-    /// An unknown error occured.
+    /// An unknown error occurred.
     case unknown
     /// The apiKey is missing.
     case invalidApiKey
@@ -19,7 +19,7 @@ public enum LingohubSDKError: Error {
     case invalidAppVersion
     /// The sdkVersion is missing.
     case invalidSdkVersion
-    /// An error with the API occured. See `statusCode` and `message` for specific information
+    /// An error with the API occurred. See `statusCode` and `message` for specific information
     case apiError(statusCode: Int, message: String?)
 }
 
@@ -28,7 +28,7 @@ extension LingohubSDKError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .unknown:
-            return "An unknown error occured."
+            return "An unknown error occurred."
         case .invalidApiKey:
             return "The apiKey is missing."
         case .invalidAppVersion:
@@ -39,7 +39,7 @@ extension LingohubSDKError: LocalizedError {
             if let message = message {
                 return message
             }
-            return "API-Error with code \"\(statusCode)\" occured"
+            return "API-Error with code \"\(statusCode)\" occurred"
         }
     }
 

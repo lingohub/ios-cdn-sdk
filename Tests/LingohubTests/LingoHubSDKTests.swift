@@ -91,15 +91,11 @@ final class LingohubSDKTests: XCTestCase {
 
 
     func testSdkVersion() async throws {
-        // Given
+        // Given/When
         sut.configureForTests()
 
-        // When
-        sut.sdkVersion = "1.0.0" // Set a test version directly
-        let sdkVersion = sut.sdkVersion
-
         // Then
-        XCTAssertEqual(sdkVersion, "1.0.0")
+        XCTAssertEqual(sut.sdkVersion, LingohubConstants.version)
     }
 
     func testLanguageOverride() async throws {
@@ -161,6 +157,20 @@ final class LingohubSDKTests: XCTestCase {
         XCTAssertEqual(sut.swizzledBundles, [bundlePath])
     }
 
+    func testSwizzlingSecondBundleKeepsFirst() async throws {
+        // Given
+        let firstBundle = Bundle(for: type(of: self))
+        let secondBundle = Bundle.module
+        XCTAssertNotEqual(firstBundle.bundlePath, secondBundle.bundlePath)
+
+        // When
+        sut.swizzleBundle(firstBundle)
+        sut.swizzleBundle(secondBundle)
+
+        // Then both bundles stay registered
+        XCTAssertEqual(Set(sut.swizzledBundles), Set([firstBundle.bundlePath, secondBundle.bundlePath]))
+    }
+
     func testUpdate() async throws {
         sut.configureForTests()
 
@@ -208,10 +218,6 @@ final class LingohubSDKTests: XCTestCase {
     }
 
 
-    func testUpdateWithMissingSdkVersion() async throws {
-    }
-
-
     func testUpdateError() async throws {
         sut.configureForTests()
 
@@ -227,10 +233,60 @@ final class LingohubSDKTests: XCTestCase {
                 switch error {
                 case LingohubSDKError.apiError(let statusCode, let message):
                     XCTAssertEqual(statusCode, 401)
+                    XCTAssertEqual(message, "Unauthorized (CDN_KEY_NOT_FOUND)")
+                default:
+                    XCTFail()
+                }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
+    }
+
+    func testUpdateErrorLegacyFormat() async throws {
+        sut.configureForTests()
+
+        MockService.mockUpdate401Legacy()
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success:
+                XCTFail()
+            case .failure(let error):
+                switch error {
+                case LingohubSDKError.apiError(let statusCode, let message):
+                    XCTAssertEqual(statusCode, 401)
                     XCTAssertEqual(message, "Unauthorized access")
                 default:
                     XCTFail()
                 }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
+    }
+
+    func testUpdateNoReleasePublished() async throws {
+        // A 404 means no release matches the app version and no fallback exists.
+        // That is a normal state (e.g. nothing published yet), not an error.
+        sut.configureForTests()
+
+        MockService.mockUpdate404()
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success(let value):
+                XCTAssertFalse(value)
+            case .failure:
+                XCTFail()
             }
 
             expectation.fulfill()

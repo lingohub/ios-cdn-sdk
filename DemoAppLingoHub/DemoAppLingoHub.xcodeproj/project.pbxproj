@@ -211,7 +211,7 @@
 			mainGroup = 4D3A5A2F2D81D0AC00D61128;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				4D16B3552D9E6CD000E263F9 /* XCRemoteSwiftPackageReference "ios-cdn-sdk" */,
+				4D16B3552D9E6CD000E263F9 /* XCLocalSwiftPackageReference ".." */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 4D3A5A392D81D0AD00D61128 /* Products */;
@@ -610,21 +610,16 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		4D16B3552D9E6CD000E263F9 /* XCRemoteSwiftPackageReference "ios-cdn-sdk" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/lingohub/ios-cdn-sdk";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 1.0.0;
-			};
+/* Begin XCLocalSwiftPackageReference section */
+		4D16B3552D9E6CD000E263F9 /* XCLocalSwiftPackageReference ".." */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "..";
 		};
-/* End XCRemoteSwiftPackageReference section */
+/* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		4D9AE4802D9E74040005FF59 /* Lingohub */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = 4D16B3552D9E6CD000E263F9 /* XCRemoteSwiftPackageReference "ios-cdn-sdk" */;
 			productName = Lingohub;
 		};
 /* End XCSwiftPackageProductDependency section */

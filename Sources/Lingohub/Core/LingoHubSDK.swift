@@ -9,12 +9,12 @@ import Foundation
 import ZIPFoundation
 
 /**
- Lingohub iOS SDK (1.0.0)
+ Lingohub iOS SDK
  Use this SDK to update your localizable strings without the need of an app update.
  */
 @MainActor public final class LingohubSDK {
     /**
-     The shared instance of the Lingohub SDk
+     The shared instance of the Lingohub SDK
      */
     public static let shared = LingohubSDK()
 
@@ -51,7 +51,7 @@ public extension LingohubSDK {
      */
     func configure(withApiKey apiKey: String, appVersion: String? = nil, environment: Environment = .production, logLevel: LogLevel = .none) {
         self.apiKey = apiKey
-        self.sdkVersion = Bundle(for: LingohubSDK.self).infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+        self.sdkVersion = LingohubConstants.version
         self.deviceIdentifier = Device.identifier
         self.environment = environment
         // Configure the logger's enabled state
@@ -70,7 +70,7 @@ public extension LingohubSDK {
             cleanUp()
         }
 
-        language = Locale.current.languageCode
+        language = Locale.lingohubLanguageCode
 
         self.appVersion = version
     }
@@ -112,32 +112,33 @@ public extension LingohubSDK {
 
     /**
      Swizzle the main Bundle of your Application.
-     If swizzeling is enabled just continue using *NSLocalizedString* methods as usual, Lingohub will do the rest.
+     If swizzling is enabled just continue using *NSLocalizedString* methods as usual, Lingohub will do the rest.
      */
     func swizzleMainBundle() {
         swizzleBundle(Bundle.main)
     }
 
     /**
-     Swizzle the given bundle.
-     If swizzeling is enabled just continue using *NSLocalizedString* methods as usual, Lingohub will do the rest.
+     Swizzle the given bundle, in addition to any bundles that are already swizzled.
+     If swizzling is enabled just continue using *NSLocalizedString* methods as usual, Lingohub will do the rest.
 
-     - Parameter bundle: The bundle you want to enable swizzeling for
+     - Parameter bundle: The bundle you want to enable swizzling for
      */
     func swizzleBundle(_ bundle: Bundle) {
         swizzleBundles([bundle])
     }
 
     /**
-     Swizzle the given bundles.
-     If swizzeling is enabled just continue using *NSLocalizedString* methods as usual, Lingohub will do the rest.
+     Swizzle the given bundles, in addition to any bundles that are already swizzled.
+     If swizzling is enabled just continue using *NSLocalizedString* methods as usual, Lingohub will do the rest.
 
-     - Parameter bundles: The bundles you want to enable swizzeling for
+     - Parameter bundles: The bundles you want to enable swizzling for
      */
-    private func swizzleBundles(_ bundles: [Bundle]) {
+    func swizzleBundles(_ bundles: [Bundle]) {
         let wasSwizzled = !swizzledBundles.isEmpty
-        swizzledBundles = bundles.map({ $0.bundlePath })
-        if !wasSwizzled {
+        let newPaths = bundles.map({ $0.bundlePath }).filter { !swizzledBundles.contains($0) }
+        swizzledBundles.append(contentsOf: newPaths)
+        if !wasSwizzled && !swizzledBundles.isEmpty {
             Bundle.swizzle()
         }
     }
@@ -161,7 +162,7 @@ public extension LingohubSDK {
 
 public extension Notification.Name {
     /**
-     Obersve this notification to get notified when Lingohub has found updated localizations
+     Observe this notification to get notified when Lingohub has found updated localizations
      */
     static let LingohubDidUpdateLocalization = Notification.Name(LingohubConstants.updateNotification)
 }
@@ -170,7 +171,7 @@ public extension Notification.Name {
 @available(swift, obsoleted: 1.0)
 @objc public extension NSNotification {
     /**
-     Obersve this notification to get notified when Lingohub has found updated localizations
+     Observe this notification to get notified when Lingohub has found updated localizations
      */
     static var LingohubDidUpdateLocalization: NSString {
         return NSString(string: LingohubConstants.updateNotification)
@@ -209,7 +210,7 @@ public extension LingohubSDK {
        LingohubLogger.shared.log("Environment: \(environment)")
        LingohubLogger.shared.log("Device ID: \(deviceIdentifier ?? "nil")")
 
-        apiClient.checkForUpdates(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion, distributionVersion: distributionVersion, environment: environment, deviceIdentifier: deviceIdentifier) { [weak self] response in
+        apiClient.checkForUpdates(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion, distributionVersion: distributionVersion, environment: environment, deviceIdentifier: deviceIdentifier, languageCode: language) { [weak self] response in
             do {
                 let bundleInfo = try response()
                 LingohubLogger.shared.log("Bundle info received: \(bundleInfo)")
@@ -232,6 +233,11 @@ public extension LingohubSDK {
                 }
             } catch APIError.noContent {
                 LingohubLogger.shared.log("No content available for update")
+                result(.success(false))
+            } catch APIError.apiError(let statusCode, _) where statusCode == 404 {
+                // 404 means no release matches this app version and no fallback release exists
+                // (e.g. nothing has been published yet). That is a normal state, not an error.
+                LingohubLogger.shared.log("No distribution release available for this app (404)")
                 result(.success(false))
             } catch APIError.apiError(let statusCode, let message) {
                 LingohubLogger.shared.log("API error: Status \(statusCode), Message: \(message ?? "No message")")
@@ -274,6 +280,7 @@ public extension LingohubSDK {
 
                 Task { @MainActor in
                     LingohubLogger.shared.log("Starting extraction process...")
+                    defer { try? fileManager.removeItem(at: temporaryUrl) }
                     do {
                         try self.useUpdatedBundle(atURL: temporaryUrl, withIdentifier: identifier, appVersion: appVersion)
                         LingohubLogger.shared.log("Bundle successfully updated")
