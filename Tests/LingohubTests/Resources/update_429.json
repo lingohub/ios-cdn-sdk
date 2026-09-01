@@ -1,0 +1,11 @@
+{
+  "type": "about:blank",
+  "status": 429,
+  "detail": "Too Many Requests",
+  "errors": [
+    {
+      "field": "USAGE",
+      "infos": ["USAGE_LIMIT_EXCEEDED"]
+    }
+  ]
+}

@@ -23,15 +23,22 @@ import ZIPFoundation
     @objc var apiKey: String?
     @objc var appVersion: String?
     @objc var sdkVersion: String?
-    @objc public var language: String?
 
-
-    // Internal cache for loaded strings [Language: [TableName: [Key: Value]]]
-    // private var localizationCache: [String: [String: [String: String]]] = [:] // Moved to LocalizationCacheManager
+    /**
+     The language the SDK currently serves. Set via `setLanguage(_:)` / `setSystemLanguage()`.
+     */
+    @objc public var language: String? {
+        get { cacheManager.language }
+        set { cacheManager.language = newValue }
+    }
 
     lazy var apiClient = APIClient(basePath: LingohubConstants.basePath)
-    lazy var cacheManager = LocalizationCacheManager(sdk: self)
-    @objc var swizzledBundles: [String] = []
+    let cacheManager = LocalizationCacheManager.shared
+
+    @objc var swizzledBundles: [String] {
+        get { cacheManager.swizzledBundlePaths }
+        set { cacheManager.swizzledBundlePaths = newValue }
+    }
 
     private var deviceIdentifier: String?
     internal init() {}
@@ -65,32 +72,36 @@ public extension LingohubSDK {
         LingohubLogger.shared.log("App version from Info.plist: \(version)")
         LingohubLogger.shared.log("Environment set to: \(environment.rawValue)")
 
+        // Move translations downloaded by SDK 1.0.x from Documents to Application Support
+        cacheManager.migrateLegacyStorageIfNeeded()
+
         // if the app version has changed, remove all updated bundles
         if isUpdatedBundleUsed, let currentVersion = updateAppVersion, currentVersion != version {
             cleanUp()
         }
 
-        language = Locale.lingohubLanguageCode
+        // Restore a persisted language override, otherwise use the system language
+        language = UserDefaults.standard.string(forKey: LingohubConstants.languageOverride) ?? Locale.lingohubLanguageCode
 
         self.appVersion = version
     }
 
     /**
-     Override the system language.
+     Override the system language. The override is persisted and restored on the next launch.
 
      - Parameter language: The ISO 639-1 two letter language code of the language, e.g. 'en' or 'de'
      */
     func setLanguage(_ language: String) {
         self.language = language
-        UserDefaults.standard.set(language, forKey: "AppleLanguage")
+        UserDefaults.standard.set(language, forKey: LingohubConstants.languageOverride)
     }
 
     /**
-     Reset the language back to the system language.
+     Reset the language back to the system language and remove the persisted override.
      */
     func setSystemLanguage() {
         self.language = nil
-        UserDefaults.standard.removeObject(forKey: "AppleLanguage")
+        UserDefaults.standard.removeObject(forKey: LingohubConstants.languageOverride)
     }
 
     /**
@@ -156,6 +167,22 @@ public extension LingohubSDK {
             }
         }
     }
+
+    /**
+     Check if there are any localization updates available for your app on Lingohub,
+     using Swift concurrency.
+
+     - Returns: `true` if new translations were downloaded and are active, `false` if there was nothing new.
+     - Throws: `LingohubSDKError` when the update check fails.
+     */
+    @discardableResult
+    func update() async throws -> Bool {
+        try await withCheckedThrowingContinuation { continuation in
+            checkForUpdate { result in
+                continuation.resume(with: result)
+            }
+        }
+    }
 }
 
 // MARK: Public Swift Interface
@@ -206,6 +233,15 @@ public extension LingohubSDK {
             result(.failure(LingohubSDKError.invalidApiKey))
             return
         }
+
+        // After a 429 (usage budget exhausted) the SDK pauses update checks for a while
+        // instead of hammering the CDN.
+        if let cooldownUntil = usageLimitCooldownUntil, cooldownUntil > Date() {
+            LingohubLogger.shared.log("Usage limit cooldown active until \(cooldownUntil), skipping update check")
+            result(.failure(LingohubSDKError.apiError(statusCode: 429, message: "Usage limit reached. Update checks are paused until \(cooldownUntil).")))
+            return
+        }
+
        LingohubLogger.shared.log("Current Bundle ID: \(distributionVersion ?? "nil")")
        LingohubLogger.shared.log("Environment: \(environment)")
        LingohubLogger.shared.log("Device ID: \(deviceIdentifier ?? "nil")")
@@ -241,6 +277,10 @@ public extension LingohubSDK {
                 result(.success(false))
             } catch APIError.apiError(let statusCode, let message) {
                 LingohubLogger.shared.log("API error: Status \(statusCode), Message: \(message ?? "No message")")
+                if statusCode == 429 {
+                    // Usage budget exhausted; pause update checks client-side.
+                    UserDefaults.standard.set(Date().addingTimeInterval(LingohubConstants.usageLimitCooldownInterval).timeIntervalSince1970, forKey: LingohubConstants.usageCooldownUntil)
+                }
                 result(.failure(LingohubSDKError.apiError(statusCode: statusCode, message: message)))
             } catch let error as DecodingError {
                 // Handle decoding errors specifically
@@ -320,6 +360,11 @@ public extension LingohubSDK {
         try fileManager.removeItem(at: destinationURL)
         try fileManager.unzipItem(at: url, to: destinationURL)
 
+        // Downloaded translations are re-downloadable, keep them out of device backups
+        if let folderUrl = cacheManager.updateBundleFolderUrl {
+            cacheManager.excludeFromBackup(folderUrl)
+        }
+
         UserDefaults.standard.set(identifier, forKey: LingohubConstants.distributionVersion)
         UserDefaults.standard.set(appVersion, forKey: LingohubConstants.appVersion)
         NotificationCenter.default.post(name: .LingohubDidUpdateLocalization, object: nil)
@@ -334,40 +379,32 @@ public extension LingohubSDK {
 
 extension LingohubSDK {
     @objc var isUpdatedBundleUsed: Bool {
-        // Check using the cache manager
-        return distributionVersion != nil && updateAppVersion != nil && cacheManager.updateBundleExists
-        // return distributionVersion != nil && updateAppVersion != nil && updateBundleExists // Original logic
+        return cacheManager.isUpdateActive
     }
 
     @objc public var updateBundleExists: Bool {
-        // Check using the cache manager
         return cacheManager.updateBundleExists
-        // return Bundle.updateBundleExists // Original logic
     }
+
     @objc var distributionVersion: String? {
-        return UserDefaults.standard.string(forKey: LingohubConstants.distributionVersion)
+        return cacheManager.distributionVersion
     }
 
     @objc var updateAppVersion: String? {
-        return UserDefaults.standard.string(forKey: LingohubConstants.appVersion)
+        return cacheManager.updateAppVersion
     }
 
-    func isSwizzeled(bundle: Bundle) -> Bool {
-        let bundlePath = bundle.bundlePath
-        let isSwizzled = swizzledBundles.contains(bundlePath)
-        let bundleName = bundle.bundleURL.lastPathComponent
-
-        if !isSwizzled {
-            LingohubLogger.shared.log("Bundle \(bundleName) is not swizzled. Path: \(bundlePath)")
-            LingohubLogger.shared.log("Swizzled bundles: \(swizzledBundles)")
-        }
-
-        return isSwizzled
+    /// The point in time until which update checks are paused after a 429 response.
+    var usageLimitCooldownUntil: Date? {
+        let timestamp = UserDefaults.standard.double(forKey: LingohubConstants.usageCooldownUntil)
+        guard timestamp > 0 else { return nil }
+        return Date(timeIntervalSince1970: timestamp)
     }
 
     func cleanUp() {
         UserDefaults.standard.removeObject(forKey: LingohubConstants.distributionVersion)
         UserDefaults.standard.removeObject(forKey: LingohubConstants.appVersion)
+        UserDefaults.standard.removeObject(forKey: LingohubConstants.usageCooldownUntil)
 
         // Use cache manager to get the folder URL for cleanup
         if let folderUrl = cacheManager.updateBundleFolderUrl {

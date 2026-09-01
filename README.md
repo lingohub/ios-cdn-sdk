@@ -9,9 +9,10 @@ A Swift SDK for over-the-air (OTA) localization with [Lingohub](https://lingohub
 ## Features
 
 * 🚀 Over-the-air localization updates via the Lingohub CDN
-* 🔄 Runtime language switching
+* 🔄 Runtime language switching, persisted across launches
 * 📱 Works with `.strings`, `.stringsdict`, and String Catalog (`.xcstrings`) projects
-* 🛠 Method swizzling for seamless integration — keep using `NSLocalizedString` as usual
+* 🛠 Method swizzling for seamless integration — keep using `NSLocalizedString` as usual, from any thread
+* ⚡ Closure and async/await APIs
 * 🔒 Descriptive error reporting
 * 🕵️ Ships a privacy manifest (`PrivacyInfo.xcprivacy`)
 * 📝 Optional debug logging
@@ -161,7 +162,7 @@ LingohubSDK.shared.setLanguage("de")
 LingohubSDK.shared.setSystemLanguage()
 ```
 
-The override applies to Lingohub-served strings for the current app session. Views that are already on screen need to be re-rendered to pick up the new language, for example:
+The override applies to Lingohub-served strings, is persisted, and is restored on the next launch. Views that are already on screen need to be re-rendered to pick up the new language, for example:
 
 ```swift
 struct ContentView: View {
@@ -223,6 +224,19 @@ LingohubSDK.shared.update { result in
 ```
 
 Callbacks are delivered on the main queue.
+
+Or with async/await:
+
+```swift
+do {
+    let updated = try await LingohubSDK.shared.update()
+    if updated {
+        // new translations are active, refresh your UI if needed
+    }
+} catch {
+    print("Lingohub update failed: \(error.localizedDescription)")
+}
+```
 
 ### Reduce network requests
 
@@ -292,7 +306,7 @@ LingohubSDK.shared.update { result in
 
 * **`update` keeps reporting `false` and nothing changes** — most likely no release is published yet for your app version and environment. Publish a release in your Distribution (or mark one as the fallback), and double-check that the `environment` you configure matches the release's environment.
 * **API error 401** — the CDN key is missing, invalid, or was revoked. The error message contains the reason (for example `CDN_KEY_NOT_FOUND`).
-* **API error 429** — your CDN usage budget is exhausted. Throttle update checks (see above).
+* **API error 429** — your CDN usage budget is exhausted. The SDK automatically pauses further update checks for an hour; consider throttling your own checks too (see above).
 
 ## Privacy
 
@@ -300,7 +314,7 @@ The SDK includes a `PrivacyInfo.xcprivacy` manifest, which Xcode merges into you
 
 * `UserDefaults` — stores the installed release ID, app version, and language override.
 * A random installation identifier stored in the keychain — sent to the CDN as an anonymous client identifier for usage metering. It is not linked to user identity and not used for tracking.
-* Downloaded translation bundles — stored in the app's container.
+* Downloaded translation bundles — stored in the app's Application Support directory and excluded from device backups (they are re-downloadable).
 
 ## Demo app
 

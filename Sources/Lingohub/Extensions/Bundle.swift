@@ -35,13 +35,18 @@ extension Bundle {
         }
     }
 
-    @MainActor @objc private func customLocalizedString(forKey key: String, value: String?, table: String?) -> String {
-        let sdk = LingohubSDK.shared
+    // `Bundle.localizedString(forKey:value:table:)` is documented thread-safe and apps call
+    // it from arbitrary threads, so this replacement must not touch main-actor state.
+    // It only reads the thread-safe `LocalizationCacheManager`.
+    @objc private func customLocalizedString(forKey key: String, value: String?, table: String?) -> String {
+        let store = LocalizationCacheManager.shared
         let effectiveTableName = table ?? "Localizable"
 
-        // 1. Check Lingohub cache for .strings first
-        if sdk.isSwizzeled(bundle: self), sdk.isUpdatedBundleUsed {
-            if let cachedString = sdk.cacheManager.getString(forKey: key, tableName: effectiveTableName, language: sdk.language) {
+        let isSwizzled = store.isSwizzled(bundlePath: self.bundlePath)
+
+        // 1. Check the Lingohub cache for .strings first
+        if isSwizzled, store.isUpdateActive {
+            if let cachedString = store.getString(forKey: key, tableName: effectiveTableName, language: store.language) {
                 // Found simple string in Lingohub cache
                 LingohubLogger.shared.log("[BUNDLE] Found key '\(key)' in cache.")
                 return cachedString
@@ -50,16 +55,15 @@ extension Bundle {
             // Not found in .strings cache. Proceed to check update bundle with system mechanism.
         }
 
-        // 2. Try system localization mechanism on the update bundle (handles .stringsdict)
-        if sdk.isSwizzeled(bundle: self), sdk.isUpdatedBundleUsed, let updateBundle = sdk.cacheManager.updateBundle {
+        // 2. Try the system localization mechanism on the update bundle (handles .stringsdict)
+        if isSwizzled, store.isUpdateActive, let updateBundle = store.updateBundle {
             LingohubLogger.shared.log("[BUNDLE] Update bundle exists at: \(updateBundle.bundleURL.path)")
             // Get the specific language bundle within the update bundle
-            let specificUpdateBundle = updateBundle.languageBundle(for: sdk.language)
-            LingohubLogger.shared.log("[BUNDLE] Using specific lang bundle: \(specificUpdateBundle.bundleURL.path) for language '\(sdk.language ?? "nil")'")
+            let specificUpdateBundle = updateBundle.languageBundle(for: store.language)
+            LingohubLogger.shared.log("[BUNDLE] Using specific lang bundle: \(specificUpdateBundle.bundleURL.path) for language '\(store.language ?? "nil")'")
 
-            // Call the original implementation ON the specificUpdateBundle
+            // Call the original implementation ON the specificUpdateBundle.
             // Since methods are swizzled, calling our selector executes the original code for that bundle instance.
-            LingohubLogger.shared.log("[BUNDLE] Calling original lookup for key '\(key)' on specific update bundle...")
             let systemResult = specificUpdateBundle.customLocalizedString(forKey: key, value: value, table: effectiveTableName)
             LingohubLogger.shared.log("[BUNDLE] Original lookup on specific update bundle returned: '\(systemResult)'")
 
@@ -70,23 +74,18 @@ extension Bundle {
                 return systemResult
             }
             LingohubLogger.shared.log("[BUNDLE] Key '\(key)' seems not found in update bundle (result matches key), falling back.")
-        } else {
-            if !sdk.isSwizzeled(bundle: self) { LingohubLogger.shared.log("[BUNDLE] Reason: Bundle \(self.bundleURL.lastPathComponent) not swizzled.") }
-            if !sdk.isUpdatedBundleUsed { LingohubLogger.shared.log("[BUNDLE] Reason: Update bundle not marked as used.") }
-            if sdk.cacheManager.updateBundle == nil { LingohubLogger.shared.log("[BUNDLE] Reason: Cache manager returned nil updateBundle.") }
+        } else if !isSwizzled {
+            LingohubLogger.shared.log("[BUNDLE] Bundle \(self.bundleURL.lastPathComponent) is not swizzled, using original lookup.")
         }
 
-        // 3. Fallback: Call the original localizedString on the original bundle (self)
+        // 3. Fallback: Call the original localizedString on the original bundle (self).
         // Handles cases: not swizzled, update bundle not used, or key not found in update bundle.
-        LingohubLogger.shared.log("[BUNDLE] Calling original lookup for key '\(key)' on original bundle: \(self.bundleURL.path)")
         let fallbackResult = self.customLocalizedString(forKey: key, value: value, table: effectiveTableName)
-        LingohubLogger.shared.log("[BUNDLE] Original bundle lookup returned: '\(fallbackResult)'")
         return fallbackResult
     }
 
     // Helper to get the language-specific bundle path (.lproj)
-    // Needs to be accessible by customLocalizedString
-    @MainActor internal func languageBundle(for language: String?) -> Bundle {
+    internal func languageBundle(for language: String?) -> Bundle {
         // Default to self if specific language bundle not found
         guard let language = language,
               let languageBundlePath = self.path(forResource: language, ofType: "lproj"),
