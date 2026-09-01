@@ -217,7 +217,7 @@ public extension Notification.Name {
     }
 }
 
-public extension LingoHubSDK {
+extension LingoHubSDK {
     /**
      Check if there are any localization updates available for your app on LingoHub
      Use the result-closure or the `LingoHubDidUpdateLocalization` notification as status callback
@@ -266,14 +266,8 @@ public extension LingoHubSDK {
                 if let self = self {
                     Task { @MainActor in
                         LingoHubLogger.shared.log("Preparing to download update...")
-                        // Use the filesUrl field from the API response
-                        if let filesUrl = bundleInfo.filesUrl {
-                            LingoHubLogger.shared.log("Starting download from URL: \(filesUrl)")
-                            self.downloadUpdate(atUrl: filesUrl, withIdentifier: bundleInfo.id, appVersion: appVersion, result: result)
-                        } else {
-                            LingoHubLogger.shared.log("Error: No valid URL found in the response")
-                            result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: "No valid download URL found in the response", errorCodes: [])))
-                        }
+                        LingoHubLogger.shared.log("Starting download from URL: \(bundleInfo.filesUrl)")
+                        self.downloadUpdate(atUrl: bundleInfo.filesUrl, withIdentifier: bundleInfo.id, appVersion: appVersion, result: result)
                     }
                 } else {
                     LingoHubLogger.shared.log("Self is nil, cannot proceed with download")
@@ -406,7 +400,7 @@ extension LingoHubSDK {
         return cacheManager.isUpdateActive
     }
 
-    @objc public var updateBundleExists: Bool {
+    @objc var updateBundleExists: Bool {
         return cacheManager.updateBundleExists
     }
 

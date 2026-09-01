@@ -26,10 +26,13 @@ internal final class LingoHubLogger: @unchecked Sendable {
 
     private init() {} // Prevent external instantiation
 
-    internal func log(_ message: String, file: String = #file, function: String = #function, line: UInt = #line) {
+    /// The message is an autoclosure so call sites never pay for string interpolation
+    /// while logging is disabled - `log(...)` sits on the localization hot path.
+    internal func log(_ message: @autoclosure () -> String, file: String = #file, function: String = #function, line: UInt = #line) {
         if logLevel == .full {
             let fileName = (file as NSString).lastPathComponent
-            LingoHubLogger.logger.debug("[\(fileName):\(line)] \(message)")
+            let resolvedMessage = message()
+            LingoHubLogger.logger.debug("[\(fileName):\(line)] \(resolvedMessage)")
         }
     }
 }

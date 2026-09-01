@@ -82,40 +82,27 @@ final class LingoHubSDKTests: XCTestCase {
     func testParsing() async throws {
         // Given
         guard let url = Bundle.module.url(forResource: "update_200", withExtension: "json"),
-              let data = try? Data(contentsOf: url)else {
+              let data = try? Data(contentsOf: url) else {
             XCTFail()
             return
         }
 
         // When
-        let endpoint = Endpoint<BundleInfo>(method: .get, path: "", parameters: [:], headers: [:]) { data in
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .custom { decoder in
-                let container = try decoder.singleValueContainer()
-                let timestamp = try container.decode(Int64.self)
-                return Date(timeIntervalSince1970: TimeInterval(timestamp) / 1000.0)
-            }
-            return try decoder.decode(BundleInfo.self, from: data)
-        }
+        let bundleInfo = try JSONDecoder().decode(BundleInfo.self, from: data)
 
         // Then
-        do {
-            let bundleInfo = try endpoint.decode(data)
-            XCTAssertEqual(bundleInfo.id, "test-bundle-id")
-            XCTAssertEqual(bundleInfo.name, "Test Bundle")
-            if #available(iOS 14.0, *) {
-                XCTAssertEqual(bundleInfo.filesUrl, URL(string: "https://s3.amazon.de/update.zip"))
-            } else {
-                // Fallback on earlier versions
-            }
+        XCTAssertEqual(bundleInfo.id, "test-bundle-id")
+        XCTAssertEqual(bundleInfo.name, "Test Bundle")
+        XCTAssertEqual(bundleInfo.filesUrl, URL(string: "https://s3.amazon.de/update.zip"))
+    }
 
-            let iso8601Formatter = ISO8601DateFormatter()
-            iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let date = iso8601Formatter.date(from: "2025-03-13T13:55:22.028+00:00")
+    func testParsingRejectsMissingFilesUrl() async throws {
+        // A 200 response without a download URL is malformed and must fail decoding
+        // instead of being silently accepted.
+        let json = Data(#"{"distributionReleaseId": "id", "name": "Bundle"}"#.utf8)
 
-            XCTAssertEqual(bundleInfo.createdAt, date)
-        } catch {
-            XCTFail()
+        XCTAssertThrowsError(try JSONDecoder().decode(BundleInfo.self, from: json)) { error in
+            XCTAssertTrue(error is DecodingError, "Expected DecodingError, got \(error)")
         }
     }
 

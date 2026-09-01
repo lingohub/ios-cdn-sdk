@@ -46,7 +46,7 @@ extension APIClient {
             LingoHubLogger.shared.log("Received API response")
             do {
                 let bundleInfo = try response()
-                LingoHubLogger.shared.log("Successfully parsed BundleInfo: id=\(bundleInfo.id), name=\(bundleInfo.name), filesUrl=\(bundleInfo.filesUrl?.absoluteString ?? "nil")")
+                LingoHubLogger.shared.log("Successfully parsed BundleInfo: id=\(bundleInfo.id), name=\(bundleInfo.name), filesUrl=\(bundleInfo.filesUrl.absoluteString)")
                 completion { return bundleInfo }
             } catch {
                 LingoHubLogger.shared.log("Error in API response: \(error)")
