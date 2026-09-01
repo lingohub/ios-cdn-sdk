@@ -41,13 +41,14 @@ final class Device {
         return read(account: account, service: service)
     }
 
-    /// SDK 1.0.x wrote the identifier with a generic account name and no service attribute.
-    /// Adopt it (re-saving under the namespaced attributes) so existing installs keep their
-    /// identifier. The legacy item is only adopted if it holds a UUID, so a host app's own
-    /// keychain item with the same account name is never picked up. The legacy item itself
-    /// is left untouched.
+    /// SDK 1.0.x wrote the identifier with a generic account name and no service attribute,
+    /// which the keychain stores as an empty service string. Adopt that item (re-saving it
+    /// under the namespaced attributes) so existing installs keep their identifier. The
+    /// query pins the service to the empty string so it can only match a service-less item
+    /// as written by 1.0.x, and the value must parse as a UUID - both guard against picking
+    /// up a host app's own keychain item. The legacy item itself is left untouched.
     private class func migrateLegacyIdentifier() -> String? {
-        guard let legacyValue = read(account: legacyAccount, service: nil),
+        guard let legacyValue = read(account: legacyAccount, service: ""),
               UUID(uuidString: legacyValue) != nil else {
             return nil
         }

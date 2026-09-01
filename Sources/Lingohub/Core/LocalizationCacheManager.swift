@@ -21,6 +21,9 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     // Internal cache for loaded strings [Language: [TableName: [Key: Value]]]
     private var localizationCache: [String: [String: [String: String]]] = [:]
+    // Bumped on every clearCache() so in-flight table loads from a previous
+    // bundle can't be written back into the freshly cleared cache.
+    private var cacheGeneration: UInt64 = 0
     private var _language: String?
     private var _swizzledBundlePaths: [String] = []
 
@@ -82,7 +85,9 @@ final class LocalizationCacheManager: @unchecked Sendable {
         // 1. Check the cache. `nil` table entry means the table was never loaded;
         //    a present table with a missing key means the key doesn't exist.
         var tableWasLoaded = false
+        var generation: UInt64 = 0
         let cachedString: String? = lock.lh_withLock {
+            generation = cacheGeneration
             if let table = localizationCache[effectiveLanguage]?[effectiveTableName] {
                 tableWasLoaded = true
                 return table[key]
@@ -105,7 +110,11 @@ final class LocalizationCacheManager: @unchecked Sendable {
         let loadedTable = loadStringsTable(tableName: effectiveTableName, language: effectiveLanguage)
 
         lock.lh_withLock {
-            localizationCache[effectiveLanguage, default: [:]][effectiveTableName] = loadedTable
+            // Only store the table if the cache wasn't cleared while we were loading,
+            // otherwise a table read from the previous bundle would survive the clear.
+            if generation == cacheGeneration {
+                localizationCache[effectiveLanguage, default: [:]][effectiveTableName] = loadedTable
+            }
         }
 
         let result = loadedTable[key]
@@ -146,7 +155,10 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     /// Clears the internal localization cache.
     func clearCache() {
-        lock.lh_withLock { localizationCache.removeAll() }
+        lock.lh_withLock {
+            localizationCache.removeAll()
+            cacheGeneration &+= 1
+        }
         LingohubLogger.shared.log("Cache Manager: Internal localization cache cleared.")
     }
 

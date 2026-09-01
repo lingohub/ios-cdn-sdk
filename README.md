@@ -238,6 +238,8 @@ do {
 }
 ```
 
+> In an async context, a bare `update()` resolves to the async variant, so write `try await LingohubSDK.shared.update()` there. For fire-and-forget inside async code, use `update(result: nil)`.
+
 ### Reduce network requests
 
 The CDN check is a network request, and CDN usage counts towards your plan. If you check on every foreground activation, consider throttling:

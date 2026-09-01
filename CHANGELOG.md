@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [1.1.0] - Unreleased
 
 ### Added
-- async/await variant of the update check: `try await LingohubSDK.shared.update()`.
+- async/await variant of the update check: `try await LingohubSDK.shared.update()`. Note: in async contexts a bare `update()` now resolves to this variant and needs `try await`; use `update(result: nil)` for fire-and-forget from async code.
 - The language override set via `setLanguage(_:)` is now persisted and restored on the next launch. `setSystemLanguage()` removes it. (The previous implementation wrote to an ineffective defaults key and lost the override on relaunch.)
 - After an HTTP 429 (CDN usage budget exhausted), the SDK pauses further update checks for one hour instead of retrying on every call.
 
