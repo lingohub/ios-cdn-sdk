@@ -12,9 +12,19 @@ import Mocker
 final class LingohubSDKTests: XCTestCase {
     let sut: LingohubSDK = LingohubSDK.testInstance()
 
+    private var testStorageRoot: URL?
+
     @MainActor
     override func setUp() async throws {
         try await super.setUp()
+
+        // Isolate all SDK storage in a unique temporary directory so the suite never
+        // reads or deletes real user directories (Documents, Application Support).
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LingohubTests-\(UUID().uuidString)")
+        testStorageRoot = root
+        sut.cacheManager.storageRootOverride = root.appendingPathComponent("current")
+        sut.cacheManager.legacyStorageRootOverride = root.appendingPathComponent("legacy")
+
         // Start from a clean slate even if a previous (crashed) run left persisted state
         sut.reset()
     }
@@ -45,6 +55,14 @@ final class LingohubSDKTests: XCTestCase {
         XCTAssertFalse(sut.updateBundleExists)
         XCTAssertEqual(sut.environment, .production)
         XCTAssertEqual(sut.swizzledBundles, [])
+
+        // Drop the per-test storage isolation
+        sut.cacheManager.storageRootOverride = nil
+        sut.cacheManager.legacyStorageRootOverride = nil
+        if let root = testStorageRoot {
+            try? FileManager.default.removeItem(at: root)
+            testStorageRoot = nil
+        }
     }
 
     func testConfiguration() async throws {
@@ -119,6 +137,26 @@ final class LingohubSDKTests: XCTestCase {
 
         // Then
         XCTAssertEqual(sut.language, "de")
+    }
+
+    func testLanguageOverridePersistsAcrossConfigure() async throws {
+        // Given
+        sut.configureForTests()
+        sut.setLanguage("de")
+        XCTAssertEqual(sut.language, "de")
+
+        // When: simulate the next app launch
+        sut.configureForTests()
+
+        // Then: the override is restored
+        XCTAssertEqual(sut.language, "de")
+
+        // When: back to the system language
+        sut.setSystemLanguage()
+        sut.configureForTests()
+
+        // Then: the persisted override is gone
+        XCTAssertNil(UserDefaults.standard.string(forKey: LingohubConstants.languageOverride))
     }
 
     func testSystemLanguage() async throws {
@@ -282,6 +320,68 @@ final class LingohubSDKTests: XCTestCase {
         }
 
         await fulfillment(of: [expectation], timeout: 3.0)
+    }
+
+    func testAsyncUpdate() async throws {
+        sut.configureForTests()
+
+        MockService.mockUpdate200()
+        MockService.mockBundleDownload200()
+
+        let updated = try await sut.updateAsync()
+
+        XCTAssertTrue(updated)
+        XCTAssertEqual(sut.updateAppVersion, TestConstants.appVersion)
+        XCTAssertEqual(sut.distributionVersion, TestConstants.bundleIdentifier)
+    }
+
+    func testAsyncUpdateNoContent() async throws {
+        sut.configureForTests()
+
+        MockService.mockUpdate204()
+
+        let updated = try await sut.updateAsync()
+
+        XCTAssertFalse(updated)
+    }
+
+    func testUsageLimitCooldown() async throws {
+        sut.configureForTests()
+        XCTAssertNil(sut.usageLimitCooldownUntil)
+
+        MockService.mockUpdate429()
+
+        let expectation = XCTestExpectation()
+        sut.update { result in
+            switch result {
+            case .success:
+                XCTFail()
+            case .failure(let error):
+                switch error {
+                case LingohubSDKError.apiError(let statusCode, let message):
+                    XCTAssertEqual(statusCode, 429)
+                    XCTAssertEqual(message, "Too Many Requests (USAGE_LIMIT_EXCEEDED)")
+                default:
+                    XCTFail()
+                }
+            }
+            expectation.fulfill()
+        }
+        await fulfillment(of: [expectation], timeout: 3.0)
+
+        // The cooldown is active: the next check fails immediately, without a network request
+        XCTAssertNotNil(sut.usageLimitCooldownUntil)
+
+        let secondExpectation = XCTestExpectation()
+        sut.update { result in
+            if case .failure(.apiError(let statusCode, _)) = result {
+                XCTAssertEqual(statusCode, 429)
+            } else {
+                XCTFail()
+            }
+            secondExpectation.fulfill()
+        }
+        await fulfillment(of: [secondExpectation], timeout: 3.0)
     }
 
     func testUpdate404WithoutInfoRemainsError() async throws {
@@ -508,5 +608,52 @@ final class LingohubSDKTests: XCTestCase {
         if let expected = systemLanguageStringPlain {
             XCTAssertEqual(expected, sut.localizedString(forKey: "StringPlain"))
         }
+    }
+
+    func testConcurrentLocalizedStringAccess() async throws {
+        // NSLocalizedString is documented thread-safe, so the swizzled lookup must be too.
+        // Given
+        sut.configureForTests()
+        sut.setLanguage("en")
+        sut.installUpdatedBundle()
+        sut.swizzleBundle(Bundle.module)
+
+        // When: hammer the swizzled lookup from many threads at once
+        DispatchQueue.concurrentPerform(iterations: 500) { i in
+            let value = NSLocalizedString("StringPlain", tableName: nil, bundle: Bundle.module, value: "", comment: "")
+            XCTAssertEqual(value, "String")
+
+            if i % 3 == 0 {
+                _ = LocalizationCacheManager.shared.getString(forKey: "OtherString", tableName: "Other", language: "en")
+            }
+            if i % 7 == 0 {
+                LocalizationCacheManager.shared.clearCache()
+            }
+        }
+
+        // Then: state is still consistent
+        XCTAssertEqual(sut.localizedString(forKey: "StringPlain"), "String")
+    }
+
+    func testLegacyStorageMigration() async throws {
+        // Runs entirely inside the per-test temporary storage roots configured in setUp,
+        // so no real user directory is ever touched or deleted.
+        let fileManager = FileManager.default
+        guard let legacyFolder = sut.cacheManager.legacyUpdateBundleFolderUrl,
+              let newFolder = sut.cacheManager.updateBundleFolderUrl else {
+            XCTFail()
+            return
+        }
+
+        // Given: a folder as written by SDK 1.0.x
+        try fileManager.createDirectory(at: legacyFolder, withIntermediateDirectories: true)
+        try "lingohub".write(to: legacyFolder.appendingPathComponent("marker.txt"), atomically: true, encoding: .utf8)
+
+        // When
+        sut.configureForTests()
+
+        // Then: the folder moved to the current storage location
+        XCTAssertFalse(fileManager.fileExists(atPath: legacyFolder.path))
+        XCTAssertTrue(fileManager.fileExists(atPath: newFolder.appendingPathComponent("marker.txt").path))
     }
 }

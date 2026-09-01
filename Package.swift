@@ -38,6 +38,7 @@ let package = Package(
                 .process("Resources/update_401.json"),
                 .process("Resources/update_401_legacy.json"),
                 .process("Resources/update_404.json"),
+                .process("Resources/update_429.json"),
                 .process("Resources/update.zip"),
                 .process("Resources/Localization")
             ]

@@ -107,4 +107,12 @@ extension MockService {
         ])
         mock.register()
     }
+
+    @objc public static func mockUpdate429() {
+        let data = loadResource("update_429", withExtension: "json")
+        let mock = Mock(url: updateUrl, ignoreQuery: true, contentType: .json, statusCode: 429, data: [
+            .post: data
+        ])
+        mock.register()
+    }
 }

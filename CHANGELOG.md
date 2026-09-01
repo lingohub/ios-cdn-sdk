@@ -2,7 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [1.1.0] - Unreleased
+
+### Added
+- async/await variant of the update check: `try await LingohubSDK.shared.updateAsync()`. Named distinctly so existing fire-and-forget `update()` calls in async contexts keep compiling unchanged.
+- The language override set via `setLanguage(_:)` is now persisted and restored on the next launch. `setSystemLanguage()` removes it. (The previous implementation wrote to an ineffective defaults key and lost the override on relaunch.)
+- After an HTTP 429 (CDN usage budget exhausted), the SDK pauses further update checks for one hour instead of retrying on every call.
+
+### Changed
+- The swizzled `Bundle.localizedString(forKey:value:table:)` path is now genuinely thread-safe: shared localization state moved into a lock-protected store, matching the documented thread-safety of `NSLocalizedString`. This also removes the false main-actor annotation that would have turned into runtime crashes under Swift 6 language mode.
+- Downloaded translation bundles moved from `Documents/Lingohub` (visible in the Files app with file sharing enabled, included in backups) to Application Support, excluded from backups. Existing installs are migrated automatically.
+- The keychain installation identifier is now stored under the SDK's own service (`com.lingohub.sdk`) with `kSecAttrAccessibleAfterFirstUnlock`, instead of a generic un-namespaced item. Identifiers written by SDK 1.0.x are adopted automatically.
+
+## [1.0.1] - Unreleased
 
 ### Fixed
 - Parse the CDN's current RFC 7807 error responses (`detail` + `errors[].infos`), so API errors carry a meaningful message again. The legacy `error_message` format is still supported as a fallback.
