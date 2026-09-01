@@ -84,13 +84,15 @@ extension APIClient {
                 default:
                     LingohubLogger.shared.log("Error response (\(statusCode))")
                     var message: String?
+                    var infos: [String] = []
                     if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
                         message = errorResponse.message
+                        infos = errorResponse.infos
                         LingohubLogger.shared.log("Error message: \(message ?? "nil")")
                     } else if let jsonString = String(data: data, encoding: .utf8) {
                         LingohubLogger.shared.log("Raw error response: \(jsonString)")
                     }
-                    throw APIError.apiError(statusCode: statusCode, message: message)
+                    throw APIError.apiError(statusCode: statusCode, message: message, infos: infos)
                 }
             } catch {
                 LingohubLogger.shared.log("Error processing response: \(error)")
@@ -107,7 +109,7 @@ extension APIClient {
         LingohubLogger.shared.log("Creating URL request for path: \(path)")
 
         var basePath = self.basePath + path
-        if (path.starts(with: "https://")) { //REMOVED HTTP - check if ok
+        if (path.starts(with: "https://")) { // absolute https URLs are used as-is
             basePath = path
             LingohubLogger.shared.log("Using absolute path: \(basePath)")
         } else {
@@ -272,10 +274,11 @@ extension APIClient {
                     completion { return destinationURL }
                 default:
                     var message: String?
+                    var infos: [String] = []
                     if let errorData = try? Data(contentsOf: temporaryURL),
-                       let errorResponse = try? JSONSerialization.jsonObject(with: errorData, options: []) as? [String: Any],
-                       let errorMessage = errorResponse["message"] as? String {
-                        message = errorMessage
+                       let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: errorData) {
+                        message = errorResponse.message
+                        infos = errorResponse.infos
                     }
                     LingohubLogger.shared.log("Download failed with status code: \(statusCode), message: \(message ?? "None")")
 
@@ -285,7 +288,7 @@ extension APIClient {
                         LingohubLogger.shared.log("Error response body: \(responseString)")
                     }
 
-                    throw APIError.apiError(statusCode: statusCode, message: message)
+                    throw APIError.apiError(statusCode: statusCode, message: message, infos: infos)
                 }
             } catch {
                 LingohubLogger.shared.log("Download completion handler error: \(error)")

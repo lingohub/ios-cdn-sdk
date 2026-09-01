@@ -1,0 +1,11 @@
+{
+  "type": "about:blank",
+  "status": 404,
+  "detail": "Not Found",
+  "errors": [
+    {
+      "field": "DISTRIBUTION",
+      "infos": ["DISTRIBUTION_NOT_FOUND"]
+    }
+  ]
+}

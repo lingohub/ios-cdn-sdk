@@ -39,7 +39,7 @@ import Foundation
         }
 
         // Determine the language and table name to use
-        let effectiveLanguage = inputLanguage ?? sdk.language ?? Locale.current.languageCode ?? "en"
+        let effectiveLanguage = inputLanguage ?? sdk.language ?? Locale.lingohubLanguageCode ?? "en"
         let effectiveTableName = tableName ?? "Localizable" // Default table name
 
          LingohubLogger.shared.log("Cache Manager: Attempting get string '\(key)' table '\(effectiveTableName)' lang '\(effectiveLanguage)'")

@@ -16,11 +16,24 @@ extension Bundle {
         return #selector(customLocalizedString(forKey:value:table:))
     }
 
+    // Guards the method exchange: swizzle/deswizzle must be balanced, otherwise an
+    // unpaired call would silently invert which implementation is active.
+    private static let swizzleLock = NSLock()
+    private static var isSwizzled = false
+
     static func swizzle() {
+        swizzleLock.lock()
+        defer { swizzleLock.unlock() }
+        guard !isSwizzled else { return }
+        isSwizzled = true
         exchangeImplementation(fromSelector: originalSelector, toSelector: customSelector)
     }
 
     @objc static func deswizzle() {
+        swizzleLock.lock()
+        defer { swizzleLock.unlock() }
+        guard isSwizzled else { return }
+        isSwizzled = false
         exchangeImplementation(fromSelector: customSelector, toSelector: originalSelector)
     }
 

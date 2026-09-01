@@ -15,6 +15,18 @@ final class LingohubSDKTests: XCTestCase {
     @MainActor
     override func setUp() async throws {
         try await super.setUp()
+        // Start from a clean slate even if a previous (crashed) run left persisted state
+        sut.reset()
+    }
+
+    /// Expected value of the update bundle's "StringPlain" for the host's system
+    /// language, or nil when the host runs a language the fixtures don't cover.
+    private var systemLanguageStringPlain: String? {
+        switch Locale.lingohubLanguageCode {
+        case "en": return "String"
+        case "de": return "Text"
+        default: return nil
+        }
     }
 
     @MainActor
@@ -91,15 +103,11 @@ final class LingohubSDKTests: XCTestCase {
 
 
     func testSdkVersion() async throws {
-        // Given
+        // Given/When
         sut.configureForTests()
 
-        // When
-        sut.sdkVersion = "1.0.0" // Set a test version directly
-        let sdkVersion = sut.sdkVersion
-
         // Then
-        XCTAssertEqual(sdkVersion, "1.0.0")
+        XCTAssertEqual(sut.sdkVersion, LingohubConstants.version)
     }
 
     func testLanguageOverride() async throws {
@@ -161,6 +169,20 @@ final class LingohubSDKTests: XCTestCase {
         XCTAssertEqual(sut.swizzledBundles, [bundlePath])
     }
 
+    func testSwizzlingSecondBundleKeepsFirst() async throws {
+        // Given
+        let firstBundle = Bundle(for: type(of: self))
+        let secondBundle = Bundle.module
+        XCTAssertNotEqual(firstBundle.bundlePath, secondBundle.bundlePath)
+
+        // When
+        sut.swizzleBundle(firstBundle)
+        sut.swizzleBundle(secondBundle)
+
+        // Then both bundles stay registered
+        XCTAssertEqual(Set(sut.swizzledBundles), Set([firstBundle.bundlePath, secondBundle.bundlePath]))
+    }
+
     func testUpdate() async throws {
         sut.configureForTests()
 
@@ -208,10 +230,6 @@ final class LingohubSDKTests: XCTestCase {
     }
 
 
-    func testUpdateWithMissingSdkVersion() async throws {
-    }
-
-
     func testUpdateError() async throws {
         sut.configureForTests()
 
@@ -227,10 +245,90 @@ final class LingohubSDKTests: XCTestCase {
                 switch error {
                 case LingohubSDKError.apiError(let statusCode, let message):
                     XCTAssertEqual(statusCode, 401)
+                    XCTAssertEqual(message, "Unauthorized (CDN_KEY_NOT_FOUND)")
+                default:
+                    XCTFail()
+                }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
+    }
+
+    func testUpdateErrorLegacyFormat() async throws {
+        sut.configureForTests()
+
+        MockService.mockUpdate401Legacy()
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success:
+                XCTFail()
+            case .failure(let error):
+                switch error {
+                case LingohubSDKError.apiError(let statusCode, let message):
+                    XCTAssertEqual(statusCode, 401)
                     XCTAssertEqual(message, "Unauthorized access")
                 default:
                     XCTFail()
                 }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
+    }
+
+    func testUpdate404WithoutInfoRemainsError() async throws {
+        // Only the CDN's DISTRIBUTION_NOT_FOUND problem is normalized to "no update".
+        // A 404 without that structured body (wrong route, proxy misconfiguration)
+        // must stay a failure.
+        sut.configureForTests()
+
+        MockService.mockUpdate404WithoutInfo()
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success:
+                XCTFail()
+            case .failure(let error):
+                switch error {
+                case LingohubSDKError.apiError(let statusCode, _):
+                    XCTAssertEqual(statusCode, 404)
+                default:
+                    XCTFail()
+                }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
+    }
+
+    func testUpdateNoReleasePublished() async throws {
+        // A 404 with the CDN's DISTRIBUTION_NOT_FOUND problem means no release matches
+        // the app version and no fallback exists. That is a normal state
+        // (e.g. nothing published yet), not an error.
+        sut.configureForTests()
+
+        MockService.mockUpdate404()
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success(let value):
+                XCTAssertFalse(value)
+            case .failure:
+                XCTFail()
             }
 
             expectation.fulfill()
@@ -303,6 +401,7 @@ final class LingohubSDKTests: XCTestCase {
     func testLocalization() async throws {
         // Given
         sut.configureForTests()
+        sut.setLanguage("en") // independent of the host's system language
 
         // When
         let stringBefore = sut.localizedString(forKey: "StringPlain")
@@ -321,12 +420,19 @@ final class LingohubSDKTests: XCTestCase {
 
     func testSwizzle() async throws {
         sut.configureForTests()
+        sut.setLanguage("en") // independent of the host's system language
         XCTAssertEqual(sut.swizzledBundles.count, 0)
 
         sut.installUpdatedBundle()
 
+        // Unswizzled lookups resolve via the system mechanism, so the expected value
+        // depends on which localization the test bundle picks for this host.
         let stringBefore = NSLocalizedString("StringPlain", tableName: nil, bundle: Bundle.module, value: "", comment: "")
-        XCTAssertEqual(stringBefore, "String from test bundle")
+        switch Bundle.module.preferredLocalizations.first {
+        case "en": XCTAssertEqual(stringBefore, "String from test bundle")
+        case "de": XCTAssertEqual(stringBefore, "Text aus dem Test Bundle")
+        default: break
+        }
 
         // Don't swizzle Bundle.module, test sut.localizedString directly
         sut.swizzleBundle(Bundle.module)
@@ -339,6 +445,7 @@ final class LingohubSDKTests: XCTestCase {
 
     func testAddedString() async throws {
         sut.configureForTests()
+        sut.setLanguage("en") // independent of the host's system language
         sut.installUpdatedBundle()
 
         let stringBefore = String.localized("OtherString", tableName: "Other")
@@ -353,6 +460,7 @@ final class LingohubSDKTests: XCTestCase {
     func testFiles() async throws {
         // Given
         sut.configureForTests()
+        sut.setLanguage("en") // independent of the host's system language
         sut.installUpdatedBundle()
         // Remove swizzling of Bundle.module
         // sut.swizzleBundle(Bundle.module)
@@ -376,10 +484,10 @@ final class LingohubSDKTests: XCTestCase {
         // Debug bundle resources
         Bundle.debugBundleResources()
 
-        // When/Then
-        let stringEn = sut.localizedString(forKey: "StringPlain")
-        XCTAssertEqual("String", stringEn)
-        let test = Bundle.module.localizedString(forKey: "StringPlain", value: nil, table: nil)
+        // When/Then: without an override, the system language decides
+        if let expected = systemLanguageStringPlain {
+            XCTAssertEqual(expected, sut.localizedString(forKey: "StringPlain"))
+        }
         // When/Then
         sut.setLanguage("de")
         let stringDe = sut.localizedString(forKey: "StringPlain")
@@ -395,9 +503,10 @@ final class LingohubSDKTests: XCTestCase {
         let stringDeAgain = sut.localizedString(forKey: "StringPlain")
         XCTAssertEqual("Text", stringDeAgain)
 
-        // When/Then
+        // When/Then: back to the system language
         sut.setSystemLanguage()
-        let stringSystemLang = sut.localizedString(forKey: "StringPlain")
-        XCTAssertEqual("String", stringSystemLang)
+        if let expected = systemLanguageStringPlain {
+            XCTAssertEqual(expected, sut.localizedString(forKey: "StringPlain"))
+        }
     }
 }

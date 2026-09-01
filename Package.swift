@@ -8,7 +8,7 @@ let package = Package(
     defaultLocalization: "en",
     platforms: [
         .iOS(.v14),
-        .macOS(.v10_15)
+        .macOS(.v11)
     ],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
@@ -25,7 +25,10 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "Lingohub",
-            dependencies: ["ZIPFoundation"]),
+            dependencies: ["ZIPFoundation"],
+            resources: [
+                .copy("PrivacyInfo.xcprivacy")
+            ]),
         .testTarget(
             name: "LingohubTests",
             dependencies: ["Lingohub", "Mocker"],
@@ -33,9 +36,10 @@ let package = Package(
                 .process("Resources/empty.json"),
                 .process("Resources/update_200.json"),
                 .process("Resources/update_401.json"),
+                .process("Resources/update_401_legacy.json"),
+                .process("Resources/update_404.json"),
                 .process("Resources/update.zip"),
                 .process("Resources/Localization")
-                // .process("Resources/update")
             ]
         ),
     ]
