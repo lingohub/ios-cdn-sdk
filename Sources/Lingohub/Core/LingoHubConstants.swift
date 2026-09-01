@@ -1,5 +1,5 @@
 //
-//  LingohubConstants.swift
+//  LingoHubConstants.swift
 //
 //
 //  Created by Manfred Baldauf on 12.03.25.
@@ -7,8 +7,8 @@
 
 import Foundation
 
-struct LingohubConstants {
-    /// The version of this SDK, reported to the Lingohub CDN as part of the client agent.
+struct LingoHubConstants {
+    /// The version of this SDK, reported to the LingoHub CDN as part of the client agent.
     /// Keep in sync with the release tag.
     static let version = "1.1.0"
     static let folderName = "Lingohub"

@@ -57,38 +57,38 @@ extension Bundle {
 
         let isSwizzled = store.isSwizzled(bundlePath: self.bundlePath)
 
-        // 1. Check the Lingohub cache for .strings first
+        // 1. Check the LingoHub cache for .strings first
         if isSwizzled, store.isUpdateActive {
             if let cachedString = store.getString(forKey: key, tableName: effectiveTableName, language: store.language) {
-                // Found simple string in Lingohub cache
-                LingohubLogger.shared.log("[BUNDLE] Found key '\(key)' in cache.")
+                // Found simple string in LingoHub cache
+                LingoHubLogger.shared.log("[BUNDLE] Found key '\(key)' in cache.")
                 return cachedString
             }
-            LingohubLogger.shared.log("[BUNDLE] Key '\(key)' NOT in cache. Checking update bundle...")
+            LingoHubLogger.shared.log("[BUNDLE] Key '\(key)' NOT in cache. Checking update bundle...")
             // Not found in .strings cache. Proceed to check update bundle with system mechanism.
         }
 
         // 2. Try the system localization mechanism on the update bundle (handles .stringsdict)
         if isSwizzled, store.isUpdateActive, let updateBundle = store.updateBundle {
-            LingohubLogger.shared.log("[BUNDLE] Update bundle exists at: \(updateBundle.bundleURL.path)")
+            LingoHubLogger.shared.log("[BUNDLE] Update bundle exists at: \(updateBundle.bundleURL.path)")
             // Get the specific language bundle within the update bundle
             let specificUpdateBundle = updateBundle.languageBundle(for: store.language)
-            LingohubLogger.shared.log("[BUNDLE] Using specific lang bundle: \(specificUpdateBundle.bundleURL.path) for language '\(store.language ?? "nil")'")
+            LingoHubLogger.shared.log("[BUNDLE] Using specific lang bundle: \(specificUpdateBundle.bundleURL.path) for language '\(store.language ?? "nil")'")
 
             // Call the original implementation ON the specificUpdateBundle.
             // Since methods are swizzled, calling our selector executes the original code for that bundle instance.
             let systemResult = specificUpdateBundle.customLocalizedString(forKey: key, value: value, table: effectiveTableName)
-            LingohubLogger.shared.log("[BUNDLE] Original lookup on specific update bundle returned: '\(systemResult)'")
+            LingoHubLogger.shared.log("[BUNDLE] Original lookup on specific update bundle returned: '\(systemResult)'")
 
             // NSLocalizedString returns the key if not found. Check if we found something different.
             // Also consider if an explicit non-empty 'value' was passed as fallback.
             if systemResult != key || (value != nil && !value!.isEmpty) {
-                LingohubLogger.shared.log("[BUNDLE] Found '\(key)' via system localization in update bundle. Returning '\(systemResult)'")
+                LingoHubLogger.shared.log("[BUNDLE] Found '\(key)' via system localization in update bundle. Returning '\(systemResult)'")
                 return systemResult
             }
-            LingohubLogger.shared.log("[BUNDLE] Key '\(key)' seems not found in update bundle (result matches key), falling back.")
+            LingoHubLogger.shared.log("[BUNDLE] Key '\(key)' seems not found in update bundle (result matches key), falling back.")
         } else if !isSwizzled {
-            LingohubLogger.shared.log("[BUNDLE] Bundle \(self.bundleURL.lastPathComponent) is not swizzled, using original lookup.")
+            LingoHubLogger.shared.log("[BUNDLE] Bundle \(self.bundleURL.lastPathComponent) is not swizzled, using original lookup.")
         }
 
         // 3. Fallback: Call the original localizedString on the original bundle (self).
@@ -103,7 +103,7 @@ extension Bundle {
         guard let language = language,
               let languageBundlePath = self.path(forResource: language, ofType: "lproj"),
               let languageBundle = Bundle(path: languageBundlePath) else {
-            LingohubLogger.shared.log("[BUNDLE] Lang bundle NOT FOUND in bundle \(self.bundleURL.lastPathComponent), using base.")
+            LingoHubLogger.shared.log("[BUNDLE] Lang bundle NOT FOUND in bundle \(self.bundleURL.lastPathComponent), using base.")
             return self
         }
         return languageBundle

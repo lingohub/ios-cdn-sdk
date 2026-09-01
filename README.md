@@ -1,26 +1,28 @@
-# Lingohub iOS SDK
+# LingoHub iOS SDK
 
+[![Release](https://img.shields.io/github/v/release/lingohub/ios-cdn-sdk?style=flat-square)](https://github.com/lingohub/ios-cdn-sdk/releases)
 [![License](https://img.shields.io/github/license/lingohub/ios-cdn-sdk?style=flat-square)](./LICENSE)
-[![Swift Package Manager](https://img.shields.io/badge/SPM-compatible-brightgreen?style=flat-square)](https://swift.org/package-manager/)
 [![Platform](https://img.shields.io/badge/platform-iOS%2014%2B-blue?style=flat-square)](#requirements)
 
-A Swift SDK for over-the-air (OTA) localization with [Lingohub](https://lingohub.com). Update your app's translations without releasing a new app version.
+A Swift SDK for over-the-air (OTA) localization with [LingoHub](https://lingohub.com). Update your app's translations without releasing a new app version.
+
+**Contents:** [How it works](#how-it-works) · [Installation](#installation) · [Get your API key](#get-your-api-key) · [Quick Start](#quick-start) · [Configuration](#configuration) · [Advanced Usage](#advanced-usage) · [Error handling](#error-handling) · [Privacy](#privacy) · [Sample app](#sample-app)
 
 ## Features
 
-* 🚀 Over-the-air localization updates via the Lingohub CDN
+* 🚀 Over-the-air localization updates via the LingoHub CDN
 * 🔄 Runtime language switching, persisted across launches
 * 📱 Works with `.strings`, `.stringsdict`, and String Catalog (`.xcstrings`) projects
-* 🛠 Method swizzling for seamless integration — keep using `NSLocalizedString` as usual, from any thread
+* 🛠 Seamless integration — keep using `NSLocalizedString(...)` as usual, from any thread
 * ⚡ Closure and async/await APIs
-* 🔒 Descriptive error reporting
+* 🔒 Descriptive error reporting with structured error codes
 * 🕵️ Ships a privacy manifest (`PrivacyInfo.xcprivacy`)
 * 📝 Optional debug logging
 
 ## How it works
 
-1. Publish a release for a **Distribution** in Lingohub.
-2. The SDK asks the Lingohub CDN whether a release matching your app version is available. Releases can target app version ranges, with an optional fallback release for all other versions.
+1. Publish a release for a **Distribution** in LingoHub.
+2. The SDK asks the LingoHub CDN whether a release matching your app version is available. Releases can target app version ranges, with an optional fallback release for all other versions.
 3. If there is a new release, the SDK downloads it and serves the updated strings through the standard localization APIs (when swizzling is enabled).
 4. Downloaded translations are cached on disk and discarded automatically when your app version changes, so a fresh app release always starts from its bundled strings.
 
@@ -35,9 +37,7 @@ If nothing has been published yet for your app version and environment, the SDK 
 
 ## Installation
 
-### Swift Package Manager
-
-In Xcode: **File → Add Package Dependencies…** and enter:
+The SDK is available via Swift Package Manager. In Xcode: **File → Add Package Dependencies…** and enter:
 
 ```
 https://github.com/lingohub/ios-cdn-sdk.git
@@ -47,17 +47,29 @@ Or add it to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/lingohub/ios-cdn-sdk.git", from: "1.0.0")
+    .package(url: "https://github.com/lingohub/ios-cdn-sdk.git", from: "1.1.0")
 ]
 ```
 
+> **Upgrading from 1.0.0?** The public API was renamed to the LingoHub brand spelling in 1.1.0:
+>
+> | Old (1.0.0)                     | New                             |
+> | ------------------------------- | ------------------------------- |
+> | `LingohubSDK`                   | `LingoHubSDK`                   |
+> | `LingohubSDKError`              | `LingoHubSDKError`              |
+> | `.LingohubDidUpdateLocalization`| `.LingoHubDidUpdateLocalization`|
+>
+> Deprecated aliases for the old type names are included, so they keep compiling with warnings — update at your own pace. The module name is unchanged (`import Lingohub`), and downloaded translations and settings migrate automatically.
+>
+> One pattern needs a manual update: `.apiError` gained a third associated value. Change `case .apiError(let statusCode, let message)` to `case .apiError(let statusCode, let message, let errorCodes)` (or `, _` if you don't need the codes). The same applies if you construct `.apiError` values yourself (e.g. in tests): add `errorCodes: []`.
+
 ## Get your API key
 
-1. In Lingohub, open your project and create a **Distribution** (type: *Mobile SDK iOS*).
+1. In LingoHub, open your project and create a **Distribution** (type: *Mobile SDK iOS*).
 2. Publish a release for the environment you want to use (or mark one release as the fallback).
-3. Copy the distribution's CDN API key — it starts with `cdn_`.
+3. Copy the distribution's CDN API key — it starts with `lh-cdn_`.
 
-See the [Lingohub CDN documentation](https://developers.lingohub.com/reference/distributions) for details.
+See the [LingoHub CDN documentation](https://developers.lingohub.com/reference/distributions) for details.
 
 ## Quick Start
 
@@ -73,10 +85,10 @@ struct YourApp: App {
 
     init() {
         // Configure the SDK with your CDN API key
-        LingohubSDK.shared.configure(withApiKey: "cdn_YOUR-API-KEY")
+        LingoHubSDK.shared.configure(withApiKey: "lh-cdn_...")
 
         // Enable method swizzling for automatic localization
-        LingohubSDK.shared.swizzleMainBundle()
+        LingoHubSDK.shared.swizzleMainBundle()
     }
 
     var body: some Scene {
@@ -86,7 +98,7 @@ struct YourApp: App {
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase == .active {
                 // Check for updates when the app becomes active
-                LingohubSDK.shared.update()
+                LingoHubSDK.shared.update()
             }
         }
     }
@@ -104,17 +116,17 @@ import Lingohub
 
 func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
     // Configure the SDK with your CDN API key
-    LingohubSDK.shared.configure(withApiKey: "cdn_YOUR-API-KEY")
+    LingoHubSDK.shared.configure(withApiKey: "lh-cdn_...")
 
     // Enable method swizzling for automatic localization
-    LingohubSDK.shared.swizzleMainBundle()
+    LingoHubSDK.shared.swizzleMainBundle()
 
     return true
 }
 
 func applicationDidBecomeActive(_ application: UIApplication) {
     // Check for updates when the app becomes active
-    LingohubSDK.shared.update()
+    LingoHubSDK.shared.update()
 }
 ```
 
@@ -126,29 +138,39 @@ With swizzling enabled, keep using `NSLocalizedString` — the SDK serves the up
 NSLocalizedString("welcome_message", comment: "Welcome message")
 ```
 
-## File formats
+Swizzling is what routes lookups through LingoHub. Without `swizzleMainBundle()`, your app keeps showing the strings packaged in the app bundle — downloaded translations are never applied (unless you use the [manual API](#manual-localization)).
+
+#### File formats
 
 * **`.strings`** — fully supported.
-* **`.stringsdict`** (plurals) — supported through the swizzled `NSLocalizedString` path. The manual `localizedString(forKey:tableName:)` API reads `.strings` files only.
-* **String Catalogs (`.xcstrings`)** — supported. Xcode compiles String Catalogs into `.strings`/`.stringsdict` at build time, so the swizzled lookup works unchanged. Lingohub delivers the updated files in the same compiled formats.
+* **`.stringsdict`** (plurals) — supported through the swizzled `NSLocalizedString` path.
+* **String Catalogs (`.xcstrings`)** — supported. Xcode compiles String Catalogs into `.strings`/`.stringsdict` at build time, so the swizzled lookup works unchanged. LingoHub delivers the updated files in the same compiled formats.
 
 ## Configuration
 
 ```swift
-LingohubSDK.shared.configure(
-    withApiKey: "cdn_YOUR-API-KEY",
-    environment: .production,
-    logLevel: .full // detailed logging, not recommended for production
+LingoHubSDK.shared.configure(
+    withApiKey: "lh-cdn_...",
+    environment: .production, // optional, defaults to .production
+    logLevel: .full           // optional, defaults to .none
 )
 ```
 
-| Parameter | Example | Description | Default |
-|-----------|---------|-------------|---------|
-| `appVersion` | `"1.2.0"` | The version of your app, used for release targeting | `CFBundleShortVersionString` from your Info.plist |
-| `environment` | `.production` | Environment to check (`.production`, `.staging`, `.development`, `.test`) | `.production` |
-| `logLevel` | `.none` | Debug logging (`.none` or `.full`) | `.none` |
+| Parameter     | Values                                                | Default                                           |
+| ------------- | ----------------------------------------------------- | ------------------------------------------------- |
+| `appVersion`  | Any version string, used for release targeting        | `CFBundleShortVersionString` from your Info.plist |
+| `environment` | `.production`, `.staging`, `.development`, `.test`    | `.production`                                     |
+| `logLevel`    | `.none`, `.full`                                      | `.none`                                           |
 
-The `appVersion` matters: releases in Lingohub can target app version ranges, and the CDN picks the release matching the version the SDK reports.
+The `environment` must match the environment of the release you published. The `appVersion` matters because releases in LingoHub can target app version ranges. Enable `.full` logging only in debug builds:
+
+```swift
+#if DEBUG
+let logLevel: LogLevel = .full
+#else
+let logLevel: LogLevel = .none
+#endif
+```
 
 ## Advanced Usage
 
@@ -156,13 +178,13 @@ The `appVersion` matters: releases in Lingohub can target app version ranges, an
 
 ```swift
 // Override with an ISO 639-1 language code
-LingohubSDK.shared.setLanguage("de")
+LingoHubSDK.shared.setLanguage("de")
 
 // Back to the system language
-LingohubSDK.shared.setSystemLanguage()
+LingoHubSDK.shared.setSystemLanguage()
 ```
 
-The override applies to Lingohub-served strings, is persisted, and is restored on the next launch. Views that are already on screen need to be re-rendered to pick up the new language, for example:
+The override applies to LingoHub-served strings, is persisted, and is restored on the next launch. Already-rendered views don't re-render themselves — drive a refresh from your UI, for example:
 
 ```swift
 struct ContentView: View {
@@ -172,7 +194,7 @@ struct ContentView: View {
         VStack {
             Text(NSLocalizedString("welcome_message", comment: ""))
             Button("Deutsch") {
-                LingohubSDK.shared.setLanguage("de")
+                LingoHubSDK.shared.setLanguage("de")
                 refreshTrigger.toggle()
             }
         }
@@ -181,26 +203,30 @@ struct ContentView: View {
 }
 ```
 
+`LingoHubSDK.shared.currentLanguageCode` returns the language currently being served (the override, or the system language when none is set) — use it to initialize that state. `LingoHubSDK.shared.language` is the override only and is `nil` when the SDK follows the system language.
+
 ### Manual localization
 
 If you prefer not to use method swizzling:
 
 ```swift
 func getLocalizedString(for key: String, tableName: String? = nil) -> String {
-    if let localizedString = LingohubSDK.shared.localizedString(forKey: key, tableName: tableName) {
+    if let localizedString = LingoHubSDK.shared.localizedString(forKey: key, tableName: tableName) {
         return localizedString
     }
     return NSLocalizedString(key, tableName: tableName, comment: "")
 }
 ```
 
+The manual API reads `.strings` files only; `.stringsdict` plurals need the swizzled path.
+
 ### Update notifications
 
-Via `NotificationCenter`:
+Via `NotificationCenter` — posted after a new translation bundle has been downloaded and is active:
 
 ```swift
 NotificationCenter.default.addObserver(
-    forName: .LingohubDidUpdateLocalization,
+    forName: .LingoHubDidUpdateLocalization,
     object: nil,
     queue: .main
 ) { [weak self] _ in
@@ -211,14 +237,14 @@ NotificationCenter.default.addObserver(
 Via callback — `true` means new translations were downloaded and are active, `false` means there was nothing new:
 
 ```swift
-LingohubSDK.shared.update { result in
+LingoHubSDK.shared.update { result in
     switch result {
     case .success(let updated):
         if updated {
             // new translations are active, refresh your UI if needed
         }
     case .failure(let error):
-        print("Lingohub update failed: \(error.localizedDescription)")
+        print("LingoHub update failed: \(error.localizedDescription)")
     }
 }
 ```
@@ -229,18 +255,18 @@ Or with async/await:
 
 ```swift
 do {
-    let updated = try await LingohubSDK.shared.updateAsync()
+    let updated = try await LingoHubSDK.shared.updateAsync()
     if updated {
         // new translations are active, refresh your UI if needed
     }
 } catch {
-    print("Lingohub update failed: \(error.localizedDescription)")
+    print("LingoHub update failed: \(error.localizedDescription)")
 }
 ```
 
 ### Reduce network requests
 
-The CDN check is a network request, and CDN usage counts towards your plan. If you check on every foreground activation, consider throttling:
+`update()` performs a network request each time it is called, and CDN usage counts towards your plan. If you don't need instant updates, check only periodically — for example once a day:
 
 ```swift
 import Foundation
@@ -264,7 +290,7 @@ final class UpdateThrottle {
 ```swift
 .onChange(of: scenePhase) { _, newPhase in
     if newPhase == .active, updateThrottle.shouldCheckForUpdates() {
-        LingohubSDK.shared.update { result in
+        LingoHubSDK.shared.update { result in
             switch result {
             case .success:
                 updateThrottle.markChecked()
@@ -278,47 +304,61 @@ final class UpdateThrottle {
 
 ## Error handling
 
-The result callback reports errors as `LingohubSDKError`:
+Two situations are **not** errors and are reported as `.success(false)` — "no new content":
+
+* **Already up to date** — the CDN answered that you have the latest release.
+* **Nothing published yet** — no release exists for your environment and app version (`DISTRIBUTION_NOT_FOUND`). Publish a release in your Distribution to resolve this.
+
+Real failures are delivered as `LingoHubSDKError`. The `.apiError` case carries the HTTP status and the server's error codes as structured fields — `statusCode: Int` and `errorCodes: [String]` — so you can react without parsing the message:
+
+| Status | Error codes                                                             | Meaning and what to do                                                                                                                  |
+| ------ | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| 401    | `CDN_KEY_NOT_FOUND`, `CDN_KEY_EXPIRED`, `TOKEN_EXPIRED`, `JWT_INVALID`  | The API key is missing, invalid, revoked, or rotated — check the key you pass to `configure`                                             |
+| 429    | `USAGE_LIMIT_EXCEEDED`                                                  | Your CDN usage budget is exhausted; the SDK pauses further checks for an hour. Consider throttling your own checks (see "Reduce network requests") |
+| 400    | —                                                                       | Malformed request — usually an SDK/backend version mismatch, please report it                                                            |
+| other  | —                                                                       | Network errors and unexpected responses                                                                                                  |
 
 ```swift
-LingohubSDK.shared.update { result in
+LingoHubSDK.shared.update { result in
     switch result {
     case .success(let updated):
         print(updated ? "Translations updated" : "Already up to date")
     case .failure(let error):
         switch error {
+        case .apiError(429, _, _):
+            scheduleRetryTomorrow()
+        case .apiError(_, _, let errorCodes) where errorCodes.contains("CDN_KEY_EXPIRED"):
+            alertKeyRotationNeeded()
         case .invalidApiKey:
             print("API key is missing — call configure first")
-        case .invalidAppVersion:
-            print("App version is missing")
-        case .invalidSdkVersion:
-            print("SDK version is missing")
-        case .apiError(let statusCode, let message):
-            print("API error \(statusCode): \(message ?? "no message")")
-        case .unknown:
-            print("An unknown error occurred")
+        default:
+            print("LingoHub update failed: \(error.localizedDescription)")
         }
     }
 }
 ```
 
+`statusCode` is `0` for local and network errors (no response was received). `.invalidApiKey`, `.invalidAppVersion`, and `.invalidSdkVersion` mean `configure` was not called or was called with incomplete data. The CDN may introduce additional error codes over time — treat the table above as non-exhaustive.
+
 ### Troubleshooting
 
-* **`update` keeps reporting `false` and nothing changes** — most likely no release is published yet for your app version and environment. Publish a release in your Distribution (or mark one as the fallback), and double-check that the `environment` you configure matches the release's environment.
-* **API error 401** — the CDN key is missing, invalid, or was revoked. The error message contains the reason (for example `CDN_KEY_NOT_FOUND`).
-* **API error 429** — your CDN usage budget is exhausted. The SDK automatically pauses further update checks for an hour; consider throttling your own checks too (see above).
+* **`update` keeps reporting `false` and nothing changes** — most likely no release is published yet for your app version and environment. Publish a release in your Distribution (or mark one as the fallback), and double-check that the `environment` you configure matches the release's environment. Enable `logLevel: .full` in a debug build to see what the SDK is doing.
+* **Strings never change, not even after an app restart** — swizzling is not enabled. Call `LingoHubSDK.shared.swizzleMainBundle()` right after `configure`; see [Quick Start](#quick-start).
+* **Strings change only after navigating away and back** — swizzling is in place, but visible views are not re-rendered when the update arrives. Observe `.LingoHubDidUpdateLocalization` and refresh your UI.
+* **Error 401** — the CDN key is missing, invalid, or was revoked. `errorCodes` contains the reason (for example `CDN_KEY_NOT_FOUND`).
+* **Error 429** — your CDN usage budget is exhausted. The SDK pauses checks for an hour; throttle your own checks too.
 
 ## Privacy
 
-The SDK includes a `PrivacyInfo.xcprivacy` manifest, which Xcode merges into your app's privacy report automatically. What the SDK touches:
+The SDK includes a `PrivacyInfo.xcprivacy` manifest, which Xcode merges into your app's privacy report automatically — relevant for your App Store privacy declarations. What the SDK touches:
 
-* `UserDefaults` — stores the installed release ID, app version, and language override.
-* A random installation identifier stored in the keychain — sent to the CDN as an anonymous client identifier for usage metering. It is not linked to user identity and not used for tracking.
-* Downloaded translation bundles — stored in the app's Application Support directory and excluded from device backups (they are re-downloadable).
+* `UserDefaults` — stores the installed release ID, the app version it was downloaded for, the language override, and the retry-pause expiry after a 429 response.
+* Downloaded translation bundles — stored in the app's Application Support directory, excluded from device backups (they are re-downloadable).
+* Each update check sends to the LingoHub CDN over HTTPS: your CDN API key (Authorization header), the configured environment and distribution type, your app's version, the currently served language, the currently installed release ID, the SDK version, and a random installation identifier (a UUID generated by the SDK and stored in the keychain) as the client identifier for usage metering. The identifier is not linked to user identity and not used for tracking, and it is declared in the bundled privacy manifest.
 
-## Demo app
+## Sample app
 
-The [DemoAppLingoHub](DemoAppLingoHub/) project in this repository shows a complete SwiftUI integration, including runtime language switching and update notifications. Open it in Xcode, insert your CDN API key in `LingohubApp.swift`, and run.
+The [DemoAppLingoHub](DemoAppLingoHub/) project in this repository shows a complete SwiftUI integration, including runtime language switching and update notifications. Open it in Xcode, insert your CDN API key in [LingohubApp.swift](DemoAppLingoHub/DemoAppLingoHub/LingohubApp.swift), and run.
 
 ## Support
 

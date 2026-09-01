@@ -16,7 +16,7 @@ extension APIClient {
             "distributionEnvironment": environment.rawValue,
             "clientVersion": appVersion,
             "clientUser": deviceIdentifier ?? UUID().uuidString,
-            "clientAgent": "Lingohub-iOS-SDK/\(sdkVersion)"
+            "clientAgent": "LingoHub-iOS-SDK/\(sdkVersion)"
         ]
 
         if let distributionVersion = distributionVersion {
@@ -27,7 +27,7 @@ extension APIClient {
             parameters["clientLanguageCode"] = languageCode
         }
 
-        LingohubLogger.shared.log("API request parameters: \(parameters)")
+        LingoHubLogger.shared.log("API request parameters: \(parameters)")
 
         // Set up headers with content-type, accept, and bearer token
         let headers: [String: String] = [
@@ -37,19 +37,19 @@ extension APIClient {
         ]
 
         let path = "v1/distributions/check"
-        LingohubLogger.shared.log("API request path: \(path)")
+        LingoHubLogger.shared.log("API request path: \(path)")
 
         let endpoint = Endpoint<BundleInfo>(method: .post, path: path, parameters: parameters, headers: headers)
-        LingohubLogger.shared.log("Sending API request")
+        LingoHubLogger.shared.log("Sending API request")
 
         request(endpoint: endpoint) { response in
-            LingohubLogger.shared.log("Received API response")
+            LingoHubLogger.shared.log("Received API response")
             do {
                 let bundleInfo = try response()
-                LingohubLogger.shared.log("Successfully parsed BundleInfo: id=\(bundleInfo.id), name=\(bundleInfo.name), filesUrl=\(bundleInfo.filesUrl?.absoluteString ?? "nil")")
+                LingoHubLogger.shared.log("Successfully parsed BundleInfo: id=\(bundleInfo.id), name=\(bundleInfo.name), filesUrl=\(bundleInfo.filesUrl?.absoluteString ?? "nil")")
                 completion { return bundleInfo }
             } catch {
-                LingohubLogger.shared.log("Error in API response: \(error)")
+                LingoHubLogger.shared.log("Error in API response: \(error)")
                 completion { throw error }
             }
         }

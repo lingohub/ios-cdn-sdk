@@ -1,5 +1,5 @@
 //
-//  LingohubSDKTests.swift
+//  LingoHubSDKTests.swift
 //
 //  Created by Manfred Baldauf on 12.03.24.
 //
@@ -9,8 +9,8 @@ import XCTest
 import Mocker
 
 @MainActor
-final class LingohubSDKTests: XCTestCase {
-    let sut: LingohubSDK = LingohubSDK.testInstance()
+final class LingoHubSDKTests: XCTestCase {
+    let sut: LingoHubSDK = LingoHubSDK.testInstance()
 
     private var testStorageRoot: URL?
 
@@ -125,7 +125,7 @@ final class LingohubSDKTests: XCTestCase {
         sut.configureForTests()
 
         // Then
-        XCTAssertEqual(sut.sdkVersion, LingohubConstants.version)
+        XCTAssertEqual(sut.sdkVersion, LingoHubConstants.version)
     }
 
     func testLanguageOverride() async throws {
@@ -156,7 +156,58 @@ final class LingohubSDKTests: XCTestCase {
         sut.configureForTests()
 
         // Then: the persisted override is gone
-        XCTAssertNil(UserDefaults.standard.string(forKey: LingohubConstants.languageOverride))
+        XCTAssertNil(UserDefaults.standard.string(forKey: LingoHubConstants.languageOverride))
+    }
+
+    func testCurrentLanguageCode() async throws {
+        // Given
+        sut.configureForTests()
+
+        // When an override is active
+        sut.setLanguage("de")
+
+        // Then both properties expose it
+        XCTAssertEqual(sut.language, "de")
+        XCTAssertEqual(sut.currentLanguageCode, "de")
+
+        // When following the system language
+        sut.setSystemLanguage()
+
+        // Then the override is nil while the served language falls back to the system
+        XCTAssertNil(sut.language)
+        XCTAssertEqual(sut.currentLanguageCode, Locale.lingohubLanguageCode)
+    }
+
+    func testInvalidUrlMapsToStatusZero() async throws {
+        // Local failures with no response use apiError(statusCode: 0, ...) too.
+        // The space in the host makes URL creation fail before any request is sent.
+        sut.configureForTests()
+        let configuration = URLSessionConfiguration.default
+        configuration.protocolClasses = [MockingURLProtocol.self]
+        sut.apiClient = APIClient(basePath: "https://exa mple.com/", configuration: configuration)
+        defer { _ = LingoHubSDK.testInstance() } // restore the mocked API client
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success:
+                XCTFail()
+            case .failure(let error):
+                switch error {
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
+                    XCTAssertEqual(statusCode, 0)
+                    XCTAssertEqual(message, "Invalid request URL")
+                    XCTAssertEqual(errorCodes, [])
+                default:
+                    XCTFail("Expected apiError, got \(error)")
+                }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
     }
 
     func testSystemLanguage() async throws {
@@ -281,9 +332,10 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, let message):
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
                     XCTAssertEqual(statusCode, 401)
                     XCTAssertEqual(message, "Unauthorized (CDN_KEY_NOT_FOUND)")
+                    XCTAssertEqual(errorCodes, ["CDN_KEY_NOT_FOUND"])
                 default:
                     XCTFail()
                 }
@@ -308,9 +360,10 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, let message):
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
                     XCTAssertEqual(statusCode, 401)
                     XCTAssertEqual(message, "Unauthorized access")
+                    XCTAssertEqual(errorCodes, [])
                 default:
                     XCTFail()
                 }
@@ -358,9 +411,10 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, let message):
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
                     XCTAssertEqual(statusCode, 429)
                     XCTAssertEqual(message, "Too Many Requests (USAGE_LIMIT_EXCEEDED)")
+                    XCTAssertEqual(errorCodes, ["USAGE_LIMIT_EXCEEDED"])
                 default:
                     XCTFail()
                 }
@@ -374,7 +428,7 @@ final class LingohubSDKTests: XCTestCase {
 
         let secondExpectation = XCTestExpectation()
         sut.update { result in
-            if case .failure(.apiError(let statusCode, _)) = result {
+            if case .failure(.apiError(let statusCode, _, _)) = result {
                 XCTAssertEqual(statusCode, 429)
             } else {
                 XCTFail()
@@ -382,6 +436,36 @@ final class LingohubSDKTests: XCTestCase {
             secondExpectation.fulfill()
         }
         await fulfillment(of: [secondExpectation], timeout: 3.0)
+    }
+
+    func testUpdateNetworkErrorMapsToStatusZero() async throws {
+        // Transport failures (offline, DNS) surface as apiError with statusCode 0,
+        // per the documented contract - not as .unknown.
+        sut.configureForTests()
+
+        MockService.mockUpdateNetworkError()
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success:
+                XCTFail()
+            case .failure(let error):
+                switch error {
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
+                    XCTAssertEqual(statusCode, 0)
+                    XCTAssertNotNil(message)
+                    XCTAssertEqual(errorCodes, [])
+                default:
+                    XCTFail("Expected apiError, got \(error)")
+                }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
     }
 
     func testUpdate404WithoutInfoRemainsError() async throws {
@@ -400,8 +484,9 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, _):
+                case LingoHubSDKError.apiError(let statusCode, _, let errorCodes):
                     XCTAssertEqual(statusCode, 404)
+                    XCTAssertEqual(errorCodes, [])
                 default:
                     XCTFail()
                 }
@@ -451,7 +536,7 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, let message):
+                case LingoHubSDKError.apiError(let statusCode, let message, _):
                     XCTAssertEqual(statusCode, 404)
                     XCTAssertNil(message)
                 default:
@@ -472,8 +557,8 @@ final class LingohubSDKTests: XCTestCase {
 
         // When/Then
         do {
-            try sut.useUpdatedBundle(atURL: TestConstants.updateBundleURL, withIdentifier: LingohubConstants.distributionVersion, appVersion: TestConstants.appVersion)
-            XCTAssertEqual(sut.distributionVersion, LingohubConstants.distributionVersion)
+            try sut.useUpdatedBundle(atURL: TestConstants.updateBundleURL, withIdentifier: LingoHubConstants.distributionVersion, appVersion: TestConstants.appVersion)
+            XCTAssertEqual(sut.distributionVersion, LingoHubConstants.distributionVersion)
         } catch {
             XCTFail()
         }
@@ -486,7 +571,7 @@ final class LingohubSDKTests: XCTestCase {
         MockService.mockBundleDownload200()
 
         // Create expectation for notification
-        let expectation = expectation(forNotification: .LingohubDidUpdateLocalization, object: nil, handler: nil)
+        let expectation = expectation(forNotification: .LingoHubDidUpdateLocalization, object: nil, handler: nil)
 
         // When
         sut.update()

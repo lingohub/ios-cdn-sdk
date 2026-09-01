@@ -7,7 +7,7 @@
 
 import Foundation
 
-/// Error body returned by the Lingohub CDN.
+/// Error body returned by the LingoHub CDN.
 ///
 /// The current API responds with an RFC 7807 problem-details body:
 /// `{"type": "about:blank", "status": 401, "detail": "Unauthorized", "errors": [{"field": "AUTHORIZATION", "infos": ["CDN_KEY_NOT_FOUND"]}]}`

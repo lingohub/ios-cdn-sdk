@@ -1,16 +1,16 @@
 /*
   Localizable.strings
-  Test App Lingohub
+  Test App LingoHub
 
   Created by Manfred Baldauf on 13.03.25.
 
 */
 
 /* Welcome message shown on the main screen */
-"welcome_message" = "Willkommen bei Lingohub";
+"welcome_message" = "Willkommen bei LingoHub";
 
 /* Brief description of the app */
-"app_description" = "Diese App demonstriert die Integration des Lingohub SDK für iOS";
+"app_description" = "Diese App demonstriert die Integration des LingoHub SDK für iOS";
 
 /* Button to refresh translations */
 "refresh_button" = "Übersetzungen aktualisieren";

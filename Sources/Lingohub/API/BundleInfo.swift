@@ -48,12 +48,12 @@ public struct BundleInfo: Codable {
             if let date = iso8601Formatter.date(from: dateString) {
                 createdAt = date
             } else {
-                LingohubLogger.shared.log("Could not parse date string: \(dateString)")
+                LingoHubLogger.shared.log("Could not parse date string: \(dateString)")
                 createdAt = Date() // Fallback to current date
             }
         } else {
             // Fallback to current date if parsing fails
-            LingohubLogger.shared.log("Could not decode createdAt field as string")
+            LingoHubLogger.shared.log("Could not decode createdAt field as string")
             createdAt = Date()
         }
     }

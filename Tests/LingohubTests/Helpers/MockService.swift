@@ -10,7 +10,7 @@ import Mocker
 
 /// A service for mocking network responses
 public final class MockService {
-    private static let updateUrl = URL(string: LingohubConstants.basePath + "v1/distributions/check")!
+    private static let updateUrl = URL(string: LingoHubConstants.basePath + "v1/distributions/check")!
     private static let downloadUrl = URL(string: "https://s3.amazon.de/update.zip")!
 
     private static func loadResource(_ name: String, withExtension fileExtension: String) -> Data {
@@ -105,6 +105,14 @@ extension MockService {
         let mock = Mock(url: updateUrl, ignoreQuery: true, contentType: .json, statusCode: 404, data: [
             .post: data
         ])
+        mock.register()
+    }
+
+    /// A transport failure before any response is received (e.g. offline).
+    @objc public static func mockUpdateNetworkError() {
+        let mock = Mock(url: updateUrl, ignoreQuery: true, contentType: .json, statusCode: 200, data: [
+            .post: Data()
+        ], requestError: URLError(.notConnectedToInternet))
         mock.register()
     }
 
