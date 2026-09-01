@@ -291,6 +291,11 @@ public extension LingoHubSDK {
                 let errorMessage = self?.formatDecodingError(error) ?? "JSON decoding error"
                 LingoHubLogger.shared.log("Decoding error: \(errorMessage)")
                 result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: errorMessage, errorCodes: [])))
+            } catch let error as URLError {
+                // Transport failure before any response was received (offline, DNS, timeout):
+                // statusCode 0 per the documented apiError contract.
+                LingoHubLogger.shared.log("Network error: \(error.localizedDescription)")
+                result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: error.localizedDescription, errorCodes: [])))
             } catch {
                 LingoHubLogger.shared.log("Unexpected error: \(error)")
                 result(.failure(LingoHubSDKError.unknown))

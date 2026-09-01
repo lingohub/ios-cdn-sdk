@@ -387,6 +387,36 @@ final class LingoHubSDKTests: XCTestCase {
         await fulfillment(of: [secondExpectation], timeout: 3.0)
     }
 
+    func testUpdateNetworkErrorMapsToStatusZero() async throws {
+        // Transport failures (offline, DNS) surface as apiError with statusCode 0,
+        // per the documented contract - not as .unknown.
+        sut.configureForTests()
+
+        MockService.mockUpdateNetworkError()
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success:
+                XCTFail()
+            case .failure(let error):
+                switch error {
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
+                    XCTAssertEqual(statusCode, 0)
+                    XCTAssertNotNil(message)
+                    XCTAssertEqual(errorCodes, [])
+                default:
+                    XCTFail("Expected apiError, got \(error)")
+                }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
+    }
+
     func testUpdate404WithoutInfoRemainsError() async throws {
         // Only the CDN's DISTRIBUTION_NOT_FOUND problem is normalized to "no update".
         // A 404 without that structured body (wrong route, proxy misconfiguration)

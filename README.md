@@ -59,7 +59,9 @@ dependencies: [
 > | `LingohubSDKError`              | `LingoHubSDKError`              |
 > | `.LingohubDidUpdateLocalization`| `.LingoHubDidUpdateLocalization`|
 >
-> Deprecated aliases for the old names are included, so existing code keeps compiling with warnings — update at your own pace. The module name is unchanged (`import Lingohub`). Downloaded translations and settings migrate automatically.
+> Deprecated aliases for the old type names are included, so they keep compiling with warnings — update at your own pace. The module name is unchanged (`import Lingohub`), and downloaded translations and settings migrate automatically.
+>
+> One pattern needs a manual update: `.apiError` gained a third associated value. Change `case .apiError(let statusCode, let message)` to `case .apiError(let statusCode, let message, let errorCodes)` (or `, _` if you don't need the codes).
 
 ## Get your API key
 
