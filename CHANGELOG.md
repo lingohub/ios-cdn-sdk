@@ -2,25 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
-## [1.1.0] - Unreleased
+## [1.1.0] - 2026-09-01
 
 ### Changed (naming)
 - The public API was renamed to the LingoHub brand spelling: `LingoHubSDK`, `LingoHubSDKError`, and `.LingoHubDidUpdateLocalization`. Deprecated aliases for the 1.0.0 type names are included for Swift and for the Objective-C `NSNotification` accessor, so they keep compiling with warnings. The module name (`import Lingohub`), persisted keys, storage folder, and the notification's raw value are unchanged; file, folder, and build-target names keep the historical spelling to avoid project churn.
 
 ### Added
 - async/await variant of the update check: `try await LingoHubSDK.shared.updateAsync()`. Named distinctly so existing fire-and-forget `update()` calls in async contexts keep compiling unchanged.
-- `LingoHubSDKError.apiError` now carries the CDN's structured error codes as a third associated value (`errorCodes: [String]`, e.g. `CDN_KEY_NOT_FOUND`, `USAGE_LIMIT_EXCEEDED`), matching the Android SDK, so apps can react programmatically without parsing the message. **Source change required** for existing `.apiError` pattern matches: add a third pattern (`, _` or `let errorCodes`) — see the migration note in the README.
-- Transport failures before a response is received (offline, DNS, timeout) and local request/response failures are now reported as `.apiError(statusCode: 0, ...)` per the documented contract, instead of `.unknown`.
+- `LingoHubSDKError.apiError` now carries the CDN's structured error codes as a third associated value (`errorCodes: [String]`, e.g. `CDN_KEY_NOT_FOUND`, `USAGE_LIMIT_EXCEEDED`), matching the Android SDK, so apps can react programmatically without parsing the message. **Source change required** for existing `.apiError` pattern matches and constructions: add a third pattern or `errorCodes: []` — see the migration note in the README.
 - `currentLanguageCode`: the language the SDK is currently serving (the override, or the system language when none is set). The `language` property remains the override only and is `nil` when following the system language.
 - The language override set via `setLanguage(_:)` is now persisted and restored on the next launch. `setSystemLanguage()` removes it. (The previous implementation wrote to an ineffective defaults key and lost the override on relaunch.)
 - After an HTTP 429 (CDN usage budget exhausted), the SDK pauses further update checks for one hour instead of retrying on every call.
+- `PrivacyInfo.xcprivacy` privacy manifest (required-reason APIs: UserDefaults CA92.1, file attributes C617.1; anonymous installation identifier declared, no tracking). Xcode merges it into the app's privacy report automatically.
+- CI workflow: build and test on macOS, build for the iOS Simulator.
+- This changelog.
 
 ### Changed
 - The swizzled `Bundle.localizedString(forKey:value:table:)` path is now genuinely thread-safe: shared localization state moved into a lock-protected store, matching the documented thread-safety of `NSLocalizedString`. This also removes the false main-actor annotation that would have turned into runtime crashes under Swift 6 language mode.
 - Downloaded translation bundles moved from `Documents/Lingohub` (visible in the Files app with file sharing enabled, included in backups) to Application Support, excluded from backups. Existing installs are migrated automatically.
 - The keychain installation identifier is now stored under the SDK's own service (`com.lingohub.sdk`) with `kSecAttrAccessibleAfterFirstUnlock`, instead of a generic un-namespaced item. Identifiers written by SDK 1.0.x are adopted automatically.
-
-## [1.0.1] - Unreleased
+- Transport failures before a response is received (offline, DNS, timeout) and local request/response failures are now reported as `.apiError(statusCode: 0, ...)` per the documented contract, instead of `.unknown`.
+- README rewritten to mirror the [LingoHub Android SDK](https://github.com/lingohub/android-cdn-sdk): all snippets compile, documents where the CDN API key comes from (keys start with `lh-cdn_`), file-format notes (`.stringsdict`, String Catalogs), an error-code table with remediation advice, troubleshooting, and a complete privacy/data-flow disclosure.
+- Demo app references the SDK by local path instead of a pinned remote revision, so it always runs against the checked-out code.
 
 ### Fixed
 - Parse the CDN's current RFC 7807 error responses (`detail` + `errors[].infos`), so API errors carry a meaningful message again. The legacy `error_message` format is still supported as a fallback.
@@ -32,15 +35,6 @@ All notable changes to this project will be documented in this file.
 - The downloaded update archive is deleted after extraction instead of accumulating in the temporary directory.
 - Replaced the deprecated `Locale.current.languageCode` API.
 - User-facing error descriptions: fixed "occured" typos.
-
-### Added
-- `PrivacyInfo.xcprivacy` privacy manifest (required-reason APIs: UserDefaults CA92.1, file attributes C617.1; anonymous installation identifier declared, no tracking). Xcode merges it into the app's privacy report automatically.
-- CI workflow: build and test on macOS, build for the iOS Simulator.
-- This changelog.
-
-### Changed
-- README rewritten: all snippets compile now, documented where the CDN API key comes from, file-format notes (`.stringsdict`, String Catalogs), troubleshooting, and privacy details.
-- Demo app references the SDK by local path instead of a pinned remote revision, so it always runs against the checked-out code.
 
 ### Removed
 - Dead code: unused `APIClientProtocol`, unused constants, an empty test, an unused test `Info.plist`, and committed `xcuserdata` files.
