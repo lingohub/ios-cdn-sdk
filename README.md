@@ -204,6 +204,18 @@ struct ContentView: View {
 
 `LingoHubSDK.shared.currentLanguageCode` returns the language currently being served (the override, or the system language when none is set) — use it to initialize that state. `LingoHubSDK.shared.language` is the override only and is `nil` when the SDK follows the system language; assigning it behaves exactly like calling `setLanguage(_:)` (persisted) or, with `nil`, `setSystemLanguage()`.
 
+#### Plurals with a language override
+
+`.stringsdict` patterns select their plural category at *format* time, from the formatting locale (a Foundation behavior, independent of this SDK). Without an override that matches automatically — the device language and the served strings agree. If you override to a language whose plural rules differ from the device language (say, `setLanguage("ru")` on an English device), format plural patterns with the override's locale instead of `String.localizedStringWithFormat`:
+
+```swift
+let pattern = NSLocalizedString("apples_count", comment: "")
+let locale = Locale(identifier: LingoHubSDK.shared.currentLanguageCode ?? "en")
+let text = NSString(format: pattern, locale: locale, count) as String
+```
+
+Languages sharing the simple one/other rule (English, German, Spanish, …) are unaffected either way.
+
 ### Manual localization
 
 If you prefer not to use method swizzling:
