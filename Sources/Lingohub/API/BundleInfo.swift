@@ -7,7 +7,7 @@
 import Foundation
 
 /// Environment for the bundle
-public enum Environment: String, Codable {
+public enum Environment: String, Codable, Sendable {
     case test = "TEST"
     case staging = "STAGING"
     case development = "DEVELOPMENT"

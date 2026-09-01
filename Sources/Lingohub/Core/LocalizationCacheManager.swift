@@ -187,25 +187,31 @@ final class LocalizationCacheManager: @unchecked Sendable {
     ///   - language: The ISO language code (e.g., "en", "de").
     /// - Returns: The localized string, or nil if not found.
     func getString(forKey key: String, tableName: String?, language inputLanguage: String?) -> String? {
-        guard let snapshot = currentSnapshot else {
-            // No update bundle in use, skip the custom cache.
-            return nil
-        }
-
-        // Determine the language and table name to use
-        let effectiveLanguage = inputLanguage ?? language ?? Locale.lingohubLanguageCode ?? "en"
         let effectiveTableName = tableName ?? "Localizable" // Default table name
 
-        // 1. Check the cache. `nil` table entry means the table was never loaded;
-        //    a present table with a missing key means the key doesn't exist.
-        var tableWasLoaded = false
+        // 1. Capture the snapshot, its generation, and the cache read under ONE lock
+        //    acquisition. Reading them separately would let an activate() slip in
+        //    between, after which a table loaded from the old release could pass the
+        //    generation guard and be cached for the new release indefinitely.
+        var snapshot: LocalizationSnapshot?
         var generation: UInt64 = 0
+        var tableWasLoaded = false
+        var effectiveLanguage = ""
         let cachedString: String? = lock.lh_withLock {
+            guard let current = _snapshot else { return nil }
+            snapshot = current
             generation = cacheGeneration
+            // `_language` directly: the `language` accessor takes this (non-recursive) lock.
+            effectiveLanguage = inputLanguage ?? _language ?? Locale.lingohubLanguageCode ?? "en"
             if let table = localizationCache[effectiveLanguage]?[effectiveTableName] {
                 tableWasLoaded = true
                 return table[key]
             }
+            return nil
+        }
+
+        guard let snapshot else {
+            // No update bundle in use, skip the custom cache.
             return nil
         }
 
@@ -259,13 +265,22 @@ final class LocalizationCacheManager: @unchecked Sendable {
     /// the release root when that language folder is missing, or nil when no release
     /// is active. Resolutions are cached; the cache is dropped on activate/deactivate.
     func languageBundle(for language: String?) -> Bundle? {
-        guard let snapshot = currentSnapshot else { return nil }
-        guard let language else { return snapshot.bundle }
+        guard let language else { return currentSnapshot?.bundle }
 
-        let capturedGeneration: UInt64 = lock.lh_withLock { cacheGeneration }
-        if let cached = lock.lh_withLock({ languageBundleCache[language] }) {
-            return cached
+        // Snapshot, generation, and the cache read are captured under one lock
+        // acquisition, for the same reason as in getString: a bundle resolved from
+        // the old release must never be cached for the new one.
+        var snapshot: LocalizationSnapshot?
+        var generation: UInt64 = 0
+        let cached: Bundle? = lock.lh_withLock {
+            guard let current = _snapshot else { return nil }
+            snapshot = current
+            generation = cacheGeneration
+            return languageBundleCache[language]
         }
+
+        guard let snapshot else { return nil }
+        if let cached { return cached }
 
         let resolved: Bundle
         if let lprojPath = snapshot.bundle.path(forResource: language, ofType: "lproj"),
@@ -276,7 +291,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
         }
 
         lock.lh_withLock {
-            if capturedGeneration == cacheGeneration {
+            if generation == cacheGeneration {
                 languageBundleCache[language] = resolved
             }
         }

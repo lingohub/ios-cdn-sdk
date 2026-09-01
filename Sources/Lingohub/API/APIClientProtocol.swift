@@ -24,7 +24,8 @@ protocol APIClientProtocol: Sendable {
 
     /// Downloads the release archive and returns the local file URL of the
     /// downloaded ZIP. The caller is responsible for deleting the file.
-    func download(from url: URL) async throws -> URL
+    /// `maxSize` caps the compressed size while bytes arrive; nil disables the cap.
+    func download(from url: URL, maxSize: Int64?) async throws -> URL
 }
 
 enum APIError: Error {

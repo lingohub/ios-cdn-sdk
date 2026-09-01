@@ -94,6 +94,69 @@ final class UpdateInstallerTests: XCTestCase {
         XCTAssertFalse(try stagingLeftoverExists())
     }
 
+    func testWrapperDirectoryArchiveIsHoistedAndUsable() async throws {
+        // "Zipped a folder" archives put everything under one wrapper directory.
+        // Runtime lookup resolves .lproj only at the bundle root, so the wrapper
+        // must be hoisted - otherwise a "successful" install would serve nothing.
+        let installer = UpdateInstaller()
+        let archive = try makeArchive(files: [
+            "MyBundle/en.lproj/Localizable.strings": Data("\"K\" = \"wrapped\";".utf8),
+            "__MACOSX/._MyBundle": Data([0x00, 0x05])
+        ])
+
+        _ = try await installer.install(archiveURL: archive, liveBundleURL: liveBundleURL, expectedSha256: nil)
+
+        XCTAssertEqual(liveValue(), "wrapped")
+        // The layout the runtime actually resolves: .lproj as a direct child
+        let bundle = try XCTUnwrap(Bundle(url: liveBundleURL))
+        XCTAssertNotNil(bundle.path(forResource: "en", ofType: "lproj"))
+    }
+
+    func testDoublyNestedLocalizationRejected() async throws {
+        // More than one level of nesting is not a shape runtime lookup can open,
+        // and not one the hoist should guess about - reject it, keep the old release.
+        let installer = UpdateInstaller()
+        _ = try await installer.install(archiveURL: makeLocalizationArchive(value: "good"), liveBundleURL: liveBundleURL, expectedSha256: nil)
+
+        let nested = try makeArchive(files: [
+            "outer/inner/en.lproj/Localizable.strings": Data("\"K\" = \"lost\";".utf8)
+        ])
+
+        let error = await expectInstallError(installer, archiveURL: nested)
+        guard case .noLocalizationContent = error else {
+            return XCTFail("Expected noLocalizationContent, got \(String(describing: error))")
+        }
+        XCTAssertEqual(liveValue(), "good")
+    }
+
+    func testStringsFileWithNonStringValuesRejected() async throws {
+        // NSDictionary(contentsOf:) also parses plists whose values are numbers or
+        // arrays, but the runtime loader requires [String: String] and would serve an
+        // empty table. Validation must apply the loader's contract.
+        let installer = UpdateInstaller()
+        _ = try await installer.install(archiveURL: makeLocalizationArchive(value: "good"), liveBundleURL: liveBundleURL, expectedSha256: nil)
+
+        let xmlPlistWithInteger = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>K</key>
+            <integer>5</integer>
+        </dict>
+        </plist>
+        """
+        let archive = try makeArchive(files: [
+            "en.lproj/Localizable.strings": Data(xmlPlistWithInteger.utf8)
+        ])
+
+        let error = await expectInstallError(installer, archiveURL: archive)
+        guard case .malformedLocalizationFile = error else {
+            return XCTFail("Expected malformedLocalizationFile, got \(String(describing: error))")
+        }
+        XCTAssertEqual(liveValue(), "good")
+    }
+
     func testArchiveJunkEntriesAreTolerated() async throws {
         // Real-world archives contain __MACOSX resource forks and AppleDouble files;
         // they must be ignored, not parsed as localization content.

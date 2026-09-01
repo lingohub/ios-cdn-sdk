@@ -62,7 +62,9 @@ actor UpdateInstaller {
         }
     }
 
-    private let limits: Limits
+    /// Immutable and Sendable, so it is readable synchronously from outside the actor
+    /// (the facade passes `maxCompressedSize` to the download layer as a streaming cap).
+    let limits: Limits
 
     init(limits: Limits = Limits()) {
         self.limits = limits
@@ -92,6 +94,7 @@ actor UpdateInstaller {
         do {
             LingoHubLogger.shared.log("Installer: extracting archive to staging at \(stagingURL.lastPathComponent)")
             try fileManager.unzipItem(at: archiveURL, to: stagingURL)
+            try hoistWrapperDirectoryIfNeeded(at: stagingURL)
             try validateStagedBundle(at: stagingURL)
 
             // Downloaded translations are re-downloadable; the exclusion travels
@@ -172,40 +175,81 @@ actor UpdateInstaller {
 
     // MARK: - Validation
 
-    /// A release is usable when it contains at least one `<lang>.lproj` with at least
-    /// one parseable `.strings`/`.stringsdict` file — and every localization file it
-    /// does contain parses. A malformed file means the CDN produced a broken release;
-    /// rejecting it keeps the previous, working translations active.
-    private func validateStagedBundle(at stagingURL: URL) throws {
+    /// Archive junk that must not influence layout decisions or validation
+    /// (macOS resource forks, AppleDouble files, Finder metadata).
+    private func isJunk(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        return name == "__MACOSX" || name == ".DS_Store" || name.hasPrefix("._")
+    }
+
+    private func isDirectory(_ url: URL) -> Bool {
+        var isDirectory: ObjCBool = false
+        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        return isDirectory.boolValue
+    }
+
+    /// Normalizes the common "zipped a folder" archive shape: when the staging root
+    /// contains no `.lproj` directories but exactly one real directory that does, that
+    /// wrapper's contents are hoisted to the root. Runtime lookup resolves `.lproj`
+    /// folders only at the bundle root, so a wrapper left in place would produce a
+    /// "successfully" installed release that serves nothing.
+    private func hoistWrapperDirectoryIfNeeded(at stagingURL: URL) throws {
         let fileManager = FileManager.default
-        guard let enumerator = fileManager.enumerator(at: stagingURL, includingPropertiesForKeys: nil) else {
-            throw InstallError.noLocalizationContent
+        let entries = (try? fileManager.contentsOfDirectory(at: stagingURL, includingPropertiesForKeys: nil))?
+            .filter { !isJunk($0) } ?? []
+
+        guard !entries.contains(where: { $0.lastPathComponent.hasSuffix(".lproj") }),
+              entries.count == 1,
+              let wrapper = entries.first,
+              isDirectory(wrapper) else {
+            return
         }
 
+        let children = try fileManager.contentsOfDirectory(at: wrapper, includingPropertiesForKeys: nil)
+        guard children.contains(where: { $0.lastPathComponent.hasSuffix(".lproj") }) else {
+            return
+        }
+
+        LingoHubLogger.shared.log("Installer: hoisting wrapper directory '\(wrapper.lastPathComponent)'")
+        for child in children {
+            try fileManager.moveItem(at: child, to: stagingURL.appendingPathComponent(child.lastPathComponent))
+        }
+        try? fileManager.removeItem(at: wrapper)
+    }
+
+    /// A release is usable when the staging root contains at least one `<lang>.lproj`
+    /// directory holding at least one valid `.strings`/`.stringsdict` file — the exact
+    /// layout runtime lookup resolves (`Bundle.path(forResource:ofType:)` finds `.lproj`
+    /// folders only at the bundle root). Validation applies the same contracts the
+    /// loaders apply later: `.strings` must cast to `[String: String]` (the cast
+    /// `loadStringsTable` performs), `.stringsdict` must be a dictionary plist.
+    /// Any violation means the CDN produced a broken release; rejecting it keeps the
+    /// previous, working translations active.
+    private func validateStagedBundle(at stagingURL: URL) throws {
+        let fileManager = FileManager.default
+        let rootEntries = (try? fileManager.contentsOfDirectory(at: stagingURL, includingPropertiesForKeys: nil)) ?? []
+
         var localizationFileCount = 0
-        for case let fileURL as URL in enumerator {
-            let name = fileURL.lastPathComponent
-            let pathComponents = fileURL.pathComponents
-
-            // Ignore archive junk (macOS resource forks and AppleDouble files).
-            guard !pathComponents.contains("__MACOSX"), !name.hasPrefix("._") else { continue }
-            guard pathComponents.contains(where: { $0.hasSuffix(".lproj") }) else { continue }
-
-            switch fileURL.pathExtension {
-            case "strings":
-                guard NSDictionary(contentsOf: fileURL) != nil else {
-                    throw InstallError.malformedLocalizationFile(name)
+        for lprojURL in rootEntries where lprojURL.lastPathComponent.hasSuffix(".lproj") && isDirectory(lprojURL) {
+            let files = (try? fileManager.contentsOfDirectory(at: lprojURL, includingPropertiesForKeys: nil)) ?? []
+            for fileURL in files where !isJunk(fileURL) {
+                let name = fileURL.lastPathComponent
+                switch fileURL.pathExtension {
+                case "strings":
+                    guard NSDictionary(contentsOf: fileURL) as? [String: String] != nil else {
+                        throw InstallError.malformedLocalizationFile(name)
+                    }
+                    localizationFileCount += 1
+                case "stringsdict":
+                    let data = try? Data(contentsOf: fileURL)
+                    let plist = data.flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) }
+                    guard plist is [String: Any] else {
+                        throw InstallError.malformedLocalizationFile(name)
+                    }
+                    localizationFileCount += 1
+                default:
+                    continue
                 }
-                localizationFileCount += 1
-            case "stringsdict":
-                let data = try? Data(contentsOf: fileURL)
-                let plist = data.flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) }
-                guard plist is [String: Any] else {
-                    throw InstallError.malformedLocalizationFile(name)
-                }
-                localizationFileCount += 1
-            default:
-                continue
             }
         }
 

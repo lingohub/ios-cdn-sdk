@@ -250,6 +250,8 @@ LingoHubSDK.shared.update { result in
 
 Callbacks are delivered on the main queue. Concurrent `update()`/`updateAsync()` calls (for example, a manual refresh racing a foreground-transition check) share a single update cycle — one network request, one install — and every caller receives the same result.
 
+Cancelling a task that awaits `updateAsync()` never aborts the shared cycle (other callers may be waiting on it); the cancelled caller throws `CancellationError` no later than when the cycle finishes.
+
 Or with async/await:
 
 ```swift

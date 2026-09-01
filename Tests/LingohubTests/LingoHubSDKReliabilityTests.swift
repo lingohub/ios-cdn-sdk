@@ -33,7 +33,7 @@ private final class CountingAPIClient: APIClientProtocol, @unchecked Sendable {
         throw APIError.noContent
     }
 
-    func download(from url: URL) async throws -> URL {
+    func download(from url: URL, maxSize: Int64?) async throws -> URL {
         throw APIError.invalidResponse
     }
 }
@@ -237,7 +237,81 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
             }
         }
 
+        // A lookup that raced an activation must not have poisoned the final
+        // release's cache with a table loaded from the previous release.
+        store.activate(bundleURL: releaseB, distributionVersion: "B", appVersion: "1")
+        XCTAssertEqual(store.getString(forKey: "K", tableName: nil, language: "en"), "B")
+
         store.deactivate()
+    }
+
+    // MARK: - Cancellation semantics
+
+    func testCancelledWaiterThrowsCancellationErrorWithoutAbortingCycle() async throws {
+        sut.configureForTests()
+        let counting = CountingAPIClient()
+        sut.apiClient = counting
+
+        let first = Task { try await sut.updateAsync() }
+        // Let the shared cycle start, then join it and cancel the joined waiter mid-flight
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let waiter = Task { try await sut.updateAsync() }
+        try await Task.sleep(nanoseconds: 10_000_000)
+        waiter.cancel()
+
+        do {
+            _ = try await waiter.value
+            XCTFail("Expected CancellationError")
+        } catch is CancellationError {
+            // Documented contract: a cancelled caller throws CancellationError no
+            // later than when the shared cycle finishes.
+        }
+
+        // The shared cycle itself was not aborted by the waiter's cancellation
+        let firstResult = try await first.value
+        XCTAssertFalse(firstResult)
+        XCTAssertEqual(counting.checkCount, 1)
+    }
+
+    // MARK: - Transfer policy
+
+    func testDownloadSizeLimitAbortsTransfer() async throws {
+        MockService.mockBundleDownload200()
+        let configuration = URLSessionConfiguration.default
+        configuration.protocolClasses = [MockingURLProtocol.self]
+        let client = APIClient(basePath: LingoHubConstants.basePath, configuration: configuration)
+
+        do {
+            _ = try await client.download(from: URL(string: "https://s3.amazon.de/update.zip")!, maxSize: 16)
+            XCTFail("Expected the download to be rejected")
+        } catch APIError.apiError(let statusCode, let message, _) {
+            XCTAssertEqual(statusCode, 0)
+            XCTAssertEqual(message, "Download exceeded the size limit")
+        }
+    }
+
+    func testRedirectGuardRefusesNonHTTPSRedirect() async throws {
+        let guardDelegate = DownloadGuardDelegate()
+        let session = URLSession.shared
+        let task = session.downloadTask(with: URL(string: "https://cdn.example/archive.zip")!)
+        defer { task.cancel() }
+        let redirect = try XCTUnwrap(HTTPURLResponse(url: URL(string: "https://cdn.example/archive.zip")!, statusCode: 302, httpVersion: nil, headerFields: nil))
+
+        // https → http downgrade is refused
+        var followed: URLRequest? = URLRequest(url: URL(string: "https://placeholder.invalid")!)
+        guardDelegate.urlSession(session, task: task, willPerformHTTPRedirection: redirect, newRequest: URLRequest(url: URL(string: "http://attacker.example/archive.zip")!)) { request in
+            followed = request
+        }
+        XCTAssertNil(followed)
+        XCTAssertTrue(guardDelegate.refusedInsecureRedirect)
+
+        // https → https is followed
+        let secureTarget = URLRequest(url: URL(string: "https://cdn2.example/archive.zip")!)
+        var followedSecure: URLRequest?
+        guardDelegate.urlSession(session, task: task, willPerformHTTPRedirection: redirect, newRequest: secureTarget) { request in
+            followedSecure = request
+        }
+        XCTAssertEqual(followedSecure?.url, secureTarget.url)
     }
 
     // MARK: - Download policy

@@ -214,18 +214,32 @@ public extension LingoHubSDK {
      Concurrent calls join the running update cycle and receive its result instead
      of starting a second network round-trip.
 
+     Cancellation: the shared update cycle itself is never cancelled — once started,
+     it always runs to completion so a joined caller's cancellation cannot abort work
+     other callers are waiting on. A caller whose task is cancelled is not unblocked
+     early; it throws `CancellationError` no later than when the cycle finishes.
+
      - Returns: `true` if new translations were downloaded and are active, `false` if there was nothing new.
-     - Throws: `LingoHubSDKError` when the update check fails.
+     - Throws: `LingoHubSDKError` when the update check fails; `CancellationError`
+       when the calling task was cancelled.
      */
     @discardableResult
     func updateAsync() async throws -> Bool {
+        try Task.checkCancellation()
+        let result: Bool
         if let inFlightUpdate {
-            return try await inFlightUpdate.value
+            result = try await inFlightUpdate.value
+        } else {
+            let task = Task { try await self.performUpdate() }
+            inFlightUpdate = task
+            defer { inFlightUpdate = nil }
+            result = try await task.value
         }
-        let task = Task { try await self.performUpdate() }
-        inFlightUpdate = task
-        defer { inFlightUpdate = nil }
-        return try await task.value
+        // Awaiting an unstructured task's value is not interruptible, so surface a
+        // cancellation that arrived while waiting now instead of returning a result
+        // the caller no longer wants.
+        try Task.checkCancellation()
+        return result
     }
 }
 
@@ -297,7 +311,7 @@ extension LingoHubSDK {
                 throw LingoHubSDKError.apiError(statusCode: 0, message: "Insecure download URL rejected", errorCodes: [])
             }
 
-            let archiveURL = try await apiClient.download(from: bundleInfo.filesUrl)
+            let archiveURL = try await apiClient.download(from: bundleInfo.filesUrl, maxSize: installer.limits.maxCompressedSize)
             defer { try? FileManager.default.removeItem(at: archiveURL) }
 
             try await installArchive(at: archiveURL, identifier: bundleInfo.id, appVersion: appVersion, expectedSha256: bundleInfo.filesSha256)

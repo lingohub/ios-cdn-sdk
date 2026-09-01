@@ -19,7 +19,10 @@ extension Bundle {
     // Guards the method exchange: swizzle/deswizzle must be balanced, otherwise an
     // unpaired call would silently invert which implementation is active.
     private static let swizzleLock = NSLock()
-    private static var isSwizzled = false
+    // Invariant: only ever read or written while holding `swizzleLock`.
+    // `nonisolated(unsafe)` because the lock provides the synchronization the
+    // compiler cannot see; without it this is an error in Swift 6 language mode.
+    nonisolated(unsafe) private static var isSwizzled = false
 
     static func swizzle() {
         swizzleLock.lh_withLock {
