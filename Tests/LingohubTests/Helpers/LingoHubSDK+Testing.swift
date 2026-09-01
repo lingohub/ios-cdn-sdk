@@ -1,5 +1,5 @@
 //
-//  LingohubSDK+Testing.swift
+//  LingoHubSDK+Testing.swift
 //
 //  Created by Manfred Baldauf on 12.03.24.
 //
@@ -8,12 +8,12 @@ import Foundation
 @testable import Lingohub
 import Mocker
 
-public extension LingohubSDK {
-    static func testInstance() -> LingohubSDK {
-        let lingohub = LingohubSDK.shared
+public extension LingoHubSDK {
+    static func testInstance() -> LingoHubSDK {
+        let lingohub = LingoHubSDK.shared
         let configuration = URLSessionConfiguration.default
         configuration.protocolClasses = [MockingURLProtocol.self]
-        lingohub.apiClient = APIClient(basePath: LingohubConstants.basePath, configuration: configuration)
+        lingohub.apiClient = APIClient(basePath: LingoHubConstants.basePath, configuration: configuration)
         return lingohub
     }
 
@@ -25,7 +25,7 @@ public extension LingohubSDK {
         do {
             try useUpdatedBundle(atURL: TestConstants.updateBundleURL, withIdentifier: TestConstants.bundleIdentifier, appVersion: TestConstants.appVersion)
         } catch {
-            print("[Lingohub] \(error)")
+            print("[LingoHub] \(error)")
 
         }
     }

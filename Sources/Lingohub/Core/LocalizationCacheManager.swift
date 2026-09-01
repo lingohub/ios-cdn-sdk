@@ -33,13 +33,13 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     init() {}
 
-    /// Replaces Application Support as the parent of the Lingohub folder. Test hook.
+    /// Replaces Application Support as the parent of the LingoHub folder. Test hook.
     var storageRootOverride: URL? {
         get { lock.lh_withLock { _storageRootOverride } }
         set { lock.lh_withLock { _storageRootOverride = newValue } }
     }
 
-    /// Replaces Documents as the parent of the legacy Lingohub folder. Test hook.
+    /// Replaces Documents as the parent of the legacy LingoHub folder. Test hook.
     var legacyStorageRootOverride: URL? {
         get { lock.lh_withLock { _legacyStorageRootOverride } }
         set { lock.lh_withLock { _legacyStorageRootOverride = newValue } }
@@ -66,11 +66,11 @@ final class LocalizationCacheManager: @unchecked Sendable {
     // MARK: - Update bundle facts (UserDefaults + FileManager, thread-safe)
 
     var distributionVersion: String? {
-        return UserDefaults.standard.string(forKey: LingohubConstants.distributionVersion)
+        return UserDefaults.standard.string(forKey: LingoHubConstants.distributionVersion)
     }
 
     var updateAppVersion: String? {
-        return UserDefaults.standard.string(forKey: LingohubConstants.appVersion)
+        return UserDefaults.standard.string(forKey: LingoHubConstants.appVersion)
     }
 
     /// Whether a downloaded update bundle is present and should be used for lookups.
@@ -96,7 +96,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
         let effectiveLanguage = inputLanguage ?? language ?? Locale.lingohubLanguageCode ?? "en"
         let effectiveTableName = tableName ?? "Localizable" // Default table name
 
-        LingohubLogger.shared.log("Cache Manager: Attempting get string '\(key)' table '\(effectiveTableName)' lang '\(effectiveLanguage)'")
+        LingoHubLogger.shared.log("Cache Manager: Attempting get string '\(key)' table '\(effectiveTableName)' lang '\(effectiveLanguage)'")
 
         // 1. Check the cache. `nil` table entry means the table was never loaded;
         //    a present table with a missing key means the key doesn't exist.
@@ -112,17 +112,17 @@ final class LocalizationCacheManager: @unchecked Sendable {
         }
 
         if let cachedString = cachedString {
-            LingohubLogger.shared.log("Cache Manager: Hit for key '\(key)'")
+            LingoHubLogger.shared.log("Cache Manager: Hit for key '\(key)'")
             return cachedString
         }
         if tableWasLoaded {
-            LingohubLogger.shared.log("Cache Manager: Table '\(effectiveTableName)' lang '\(effectiveLanguage)' loaded previously, but key '\(key)' missing.")
+            LingoHubLogger.shared.log("Cache Manager: Table '\(effectiveTableName)' lang '\(effectiveLanguage)' loaded previously, but key '\(key)' missing.")
             return nil
         }
 
         // 2. Load the .strings file for the language and table from the update bundle.
         //    Loading happens outside the lock; concurrent loads are idempotent.
-        LingohubLogger.shared.log("Cache Manager: Miss for table '\(effectiveTableName)' lang '\(effectiveLanguage)'. Attempting to load.")
+        LingoHubLogger.shared.log("Cache Manager: Miss for table '\(effectiveTableName)' lang '\(effectiveLanguage)'. Attempting to load.")
         let loadedTable = loadStringsTable(tableName: effectiveTableName, language: effectiveLanguage)
 
         lock.lh_withLock {
@@ -135,7 +135,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
         let result = loadedTable[key]
         if result == nil {
-            LingohubLogger.shared.log("Cache Manager: Key '\(key)' not found in table '\(effectiveTableName)' lang '\(effectiveLanguage)'.")
+            LingoHubLogger.shared.log("Cache Manager: Key '\(key)' not found in table '\(effectiveTableName)' lang '\(effectiveLanguage)'.")
         }
         return result
     }
@@ -144,28 +144,28 @@ final class LocalizationCacheManager: @unchecked Sendable {
     /// file is missing or unreadable, so failed lookups are cached and not retried.
     private func loadStringsTable(tableName: String, language: String) -> [String: String] {
         guard let updateBundle = self.updateBundle else {
-            LingohubLogger.shared.log("Cache Manager: Update bundle not found, cannot load strings.")
+            LingoHubLogger.shared.log("Cache Manager: Update bundle not found, cannot load strings.")
             return [:]
         }
 
         guard let lprojPath = updateBundle.path(forResource: language, ofType: "lproj"),
               let lprojBundle = Bundle(path: lprojPath) else {
-            LingohubLogger.shared.log("Cache Manager: Could not find '\(language).lproj' in update bundle.")
+            LingoHubLogger.shared.log("Cache Manager: Could not find '\(language).lproj' in update bundle.")
             return [:]
         }
 
         guard let stringsFilePath = lprojBundle.path(forResource: tableName, ofType: "strings") else {
-            LingohubLogger.shared.log("Cache Manager: Could not find '\(tableName).strings' in '\(language).lproj'.")
+            LingoHubLogger.shared.log("Cache Manager: Could not find '\(tableName).strings' in '\(language).lproj'.")
             return [:]
         }
 
-        LingohubLogger.shared.log("Cache Manager: Loading strings from: \(stringsFilePath)")
+        LingoHubLogger.shared.log("Cache Manager: Loading strings from: \(stringsFilePath)")
         guard let stringsDict = NSDictionary(contentsOfFile: stringsFilePath) as? [String: String] else {
-            LingohubLogger.shared.log("Cache Manager: Failed to load or parse '\(tableName).strings'")
+            LingoHubLogger.shared.log("Cache Manager: Failed to load or parse '\(tableName).strings'")
             return [:]
         }
 
-        LingohubLogger.shared.log("Cache Manager: Loaded \(stringsDict.count) strings for table '\(tableName)' lang '\(language)'.")
+        LingoHubLogger.shared.log("Cache Manager: Loaded \(stringsDict.count) strings for table '\(tableName)' lang '\(language)'.")
         return stringsDict
     }
 
@@ -175,7 +175,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
             localizationCache.removeAll()
             cacheGeneration &+= 1
         }
-        LingohubLogger.shared.log("Cache Manager: Internal localization cache cleared.")
+        LingoHubLogger.shared.log("Cache Manager: Internal localization cache cleared.")
     }
 
     // MARK: - Update Bundle Access
@@ -190,19 +190,19 @@ final class LocalizationCacheManager: @unchecked Sendable {
         return FileManager.default.fileExists(atPath: url.path)
     }
 
-    /// The full URL to the Lingohub folder in Application Support, or nil if it can't be determined.
+    /// The full URL to the LingoHub folder in Application Support, or nil if it can't be determined.
     var updateBundleFolderUrl: URL? {
         let root = storageRootOverride ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        return root?.appendingPathComponent(LingohubConstants.folderName)
+        return root?.appendingPathComponent(LingoHubConstants.folderName)
     }
 
-    /// The Lingohub folder location used by SDK 1.0.x (in Documents).
+    /// The LingoHub folder location used by SDK 1.0.x (in Documents).
     var legacyUpdateBundleFolderUrl: URL? {
         let root = legacyStorageRootOverride ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
-        return root?.appendingPathComponent(LingohubConstants.folderName)
+        return root?.appendingPathComponent(LingoHubConstants.folderName)
     }
 
-    /// The full URL to the `update.bundle` directory within the Lingohub folder.
+    /// The full URL to the `update.bundle` directory within the LingoHub folder.
     var updateBundleUrl: URL? {
         return updateBundleFolderUrl?.appendingPathComponent(LocalizationCacheManager.updateBundleName)
     }
@@ -217,7 +217,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     // MARK: - Storage housekeeping
 
-    /// Moves the update bundle folder from its legacy location (`Documents/Lingohub`,
+    /// Moves the update bundle folder from its legacy location (`Documents/LingoHub`,
     /// used by SDK 1.0.x) to Application Support and excludes it from backups.
     func migrateLegacyStorageIfNeeded() {
         let fileManager = FileManager.default
@@ -237,9 +237,9 @@ final class LocalizationCacheManager: @unchecked Sendable {
                 try fileManager.moveItem(at: legacyUrl, to: currentUrl)
             }
             excludeFromBackup(currentUrl)
-            LingohubLogger.shared.log("Cache Manager: Migrated update bundle storage to Application Support.")
+            LingoHubLogger.shared.log("Cache Manager: Migrated update bundle storage to Application Support.")
         } catch {
-            LingohubLogger.shared.log("Cache Manager: Storage migration failed: \(error)")
+            LingoHubLogger.shared.log("Cache Manager: Storage migration failed: \(error)")
         }
     }
 
@@ -252,7 +252,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
         do {
             try url.setResourceValues(values)
         } catch {
-            LingohubLogger.shared.log("Cache Manager: Could not exclude \(url.lastPathComponent) from backup: \(error)")
+            LingoHubLogger.shared.log("Cache Manager: Could not exclude \(url.lastPathComponent) from backup: \(error)")
         }
     }
 }

@@ -20,20 +20,20 @@ import XCTest
 
     static func debugBundleResources() {
         let bundle = tests
-         LingohubLogger.shared.log("Bundle path: \(bundle.bundlePath)")
+         LingoHubLogger.shared.log("Bundle path: \(bundle.bundlePath)")
         if let resourcePath = bundle.resourcePath {
             do {
                 let resources = try FileManager.default.contentsOfDirectory(atPath: resourcePath)
-                 LingohubLogger.shared.log("Resources in bundle: \(resources)")
+                 LingoHubLogger.shared.log("Resources in bundle: \(resources)")
 
                 // Check for .lproj directories specifically
                 let lprojDirs = resources.filter { $0.hasSuffix(".lproj") }
-                 LingohubLogger.shared.log("Found .lproj directories: \(lprojDirs)")
+                 LingoHubLogger.shared.log("Found .lproj directories: \(lprojDirs)")
             } catch {
-                 LingohubLogger.shared.log("Error listing resources: \(error)")
+                 LingoHubLogger.shared.log("Error listing resources: \(error)")
             }
         } else {
-             LingohubLogger.shared.log("No resource path found in bundle")
+             LingoHubLogger.shared.log("No resource path found in bundle")
         }
     }
 }

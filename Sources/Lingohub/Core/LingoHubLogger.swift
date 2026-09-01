@@ -2,7 +2,7 @@ import Foundation
 import os
 
 /**
- Log level for Lingohub SDK
+ Log level for LingoHub SDK
  */
 public enum LogLevel: Sendable {
     /// No debug logging
@@ -12,9 +12,9 @@ public enum LogLevel: Sendable {
 }
 
 /// SDK logger. Callable from any thread; the log level is protected by a lock.
-internal final class LingohubLogger: @unchecked Sendable {
-    static let shared: LingohubLogger = LingohubLogger()
-    static private let logger: Logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.lingohub", category: "Lingohub")
+internal final class LingoHubLogger: @unchecked Sendable {
+    static let shared: LingoHubLogger = LingoHubLogger()
+    static private let logger: Logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "com.lingohub", category: "LingoHub")
 
     private let lock = NSLock()
     private var _logLevel: LogLevel = .none
@@ -29,7 +29,7 @@ internal final class LingohubLogger: @unchecked Sendable {
     internal func log(_ message: String, file: String = #file, function: String = #function, line: UInt = #line) {
         if logLevel == .full {
             let fileName = (file as NSString).lastPathComponent
-            LingohubLogger.logger.debug("[\(fileName):\(line)] \(message)")
+            LingoHubLogger.logger.debug("[\(fileName):\(line)] \(message)")
         }
     }
 }

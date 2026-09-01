@@ -1,5 +1,5 @@
 //
-//  LingohubSDKTests.swift
+//  LingoHubSDKTests.swift
 //
 //  Created by Manfred Baldauf on 12.03.24.
 //
@@ -9,8 +9,8 @@ import XCTest
 import Mocker
 
 @MainActor
-final class LingohubSDKTests: XCTestCase {
-    let sut: LingohubSDK = LingohubSDK.testInstance()
+final class LingoHubSDKTests: XCTestCase {
+    let sut: LingoHubSDK = LingoHubSDK.testInstance()
 
     private var testStorageRoot: URL?
 
@@ -125,7 +125,7 @@ final class LingohubSDKTests: XCTestCase {
         sut.configureForTests()
 
         // Then
-        XCTAssertEqual(sut.sdkVersion, LingohubConstants.version)
+        XCTAssertEqual(sut.sdkVersion, LingoHubConstants.version)
     }
 
     func testLanguageOverride() async throws {
@@ -156,7 +156,7 @@ final class LingohubSDKTests: XCTestCase {
         sut.configureForTests()
 
         // Then: the persisted override is gone
-        XCTAssertNil(UserDefaults.standard.string(forKey: LingohubConstants.languageOverride))
+        XCTAssertNil(UserDefaults.standard.string(forKey: LingoHubConstants.languageOverride))
     }
 
     func testSystemLanguage() async throws {
@@ -281,9 +281,10 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, let message):
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
                     XCTAssertEqual(statusCode, 401)
                     XCTAssertEqual(message, "Unauthorized (CDN_KEY_NOT_FOUND)")
+                    XCTAssertEqual(errorCodes, ["CDN_KEY_NOT_FOUND"])
                 default:
                     XCTFail()
                 }
@@ -308,9 +309,10 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, let message):
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
                     XCTAssertEqual(statusCode, 401)
                     XCTAssertEqual(message, "Unauthorized access")
+                    XCTAssertEqual(errorCodes, [])
                 default:
                     XCTFail()
                 }
@@ -358,9 +360,10 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, let message):
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
                     XCTAssertEqual(statusCode, 429)
                     XCTAssertEqual(message, "Too Many Requests (USAGE_LIMIT_EXCEEDED)")
+                    XCTAssertEqual(errorCodes, ["USAGE_LIMIT_EXCEEDED"])
                 default:
                     XCTFail()
                 }
@@ -374,7 +377,7 @@ final class LingohubSDKTests: XCTestCase {
 
         let secondExpectation = XCTestExpectation()
         sut.update { result in
-            if case .failure(.apiError(let statusCode, _)) = result {
+            if case .failure(.apiError(let statusCode, _, _)) = result {
                 XCTAssertEqual(statusCode, 429)
             } else {
                 XCTFail()
@@ -400,8 +403,9 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, _):
+                case LingoHubSDKError.apiError(let statusCode, _, let errorCodes):
                     XCTAssertEqual(statusCode, 404)
+                    XCTAssertEqual(errorCodes, [])
                 default:
                     XCTFail()
                 }
@@ -451,7 +455,7 @@ final class LingohubSDKTests: XCTestCase {
                 XCTFail()
             case .failure(let error):
                 switch error {
-                case LingohubSDKError.apiError(let statusCode, let message):
+                case LingoHubSDKError.apiError(let statusCode, let message, _):
                     XCTAssertEqual(statusCode, 404)
                     XCTAssertNil(message)
                 default:
@@ -472,8 +476,8 @@ final class LingohubSDKTests: XCTestCase {
 
         // When/Then
         do {
-            try sut.useUpdatedBundle(atURL: TestConstants.updateBundleURL, withIdentifier: LingohubConstants.distributionVersion, appVersion: TestConstants.appVersion)
-            XCTAssertEqual(sut.distributionVersion, LingohubConstants.distributionVersion)
+            try sut.useUpdatedBundle(atURL: TestConstants.updateBundleURL, withIdentifier: LingoHubConstants.distributionVersion, appVersion: TestConstants.appVersion)
+            XCTAssertEqual(sut.distributionVersion, LingoHubConstants.distributionVersion)
         } catch {
             XCTFail()
         }
@@ -486,7 +490,7 @@ final class LingohubSDKTests: XCTestCase {
         MockService.mockBundleDownload200()
 
         // Create expectation for notification
-        let expectation = expectation(forNotification: .LingohubDidUpdateLocalization, object: nil, handler: nil)
+        let expectation = expectation(forNotification: .LingoHubDidUpdateLocalization, object: nil, handler: nil)
 
         // When
         sut.update()

@@ -1,6 +1,6 @@
 //
 //  ContentView.swift
-//  Test App Lingohub
+//  Test App LingoHub
 //
 //  Created by Manfred Baldauf on 12.03.25.
 //
@@ -18,7 +18,7 @@ struct ContentView: View {
                 .imageScale(.large)
                 .foregroundStyle(.tint)
 
-            // Using NSLocalizedString which will be handled by Lingohub's swizzling
+            // Using NSLocalizedString which will be handled by LingoHub's swizzling
             Text(NSLocalizedString("welcome_message", comment: "Welcome message shown on the main screen"))
                 .font(.title)
                 .multilineTextAlignment(.center)
@@ -32,7 +32,7 @@ struct ContentView: View {
                     NSLocalizedString("switch_to_english", comment: "Button to switch to English language")) {
                 // Toggle between English and German
                 let newLanguage = currentLanguage == "en" ? "de" : "en"
-                LingohubSDK.shared.setLanguage(newLanguage)
+                LingoHubSDK.shared.setLanguage(newLanguage)
                 currentLanguage = newLanguage
 
                 // Force view refresh
@@ -45,7 +45,7 @@ struct ContentView: View {
 
             // Update button
             Button(NSLocalizedString("check_for_updates", comment: "Button to check for content updates")) {
-                LingohubSDK.shared.update()
+                LingoHubSDK.shared.update()
 
             }
             .padding()
@@ -58,7 +58,7 @@ struct ContentView: View {
         .onAppear {
             setupNotificationObserver()
             // Initialize current language
-            if let language = LingohubSDK.shared.language {
+            if let language = LingoHubSDK.shared.language {
                 currentLanguage = language
             }
         }
@@ -66,10 +66,10 @@ struct ContentView: View {
     }
 
     private func setupNotificationObserver() {
-        NotificationCenter.default.removeObserver(self, name: .LingohubDidUpdateLocalization, object: nil)
+        NotificationCenter.default.removeObserver(self, name: .LingoHubDidUpdateLocalization, object: nil)
 
         NotificationCenter.default.addObserver(
-            forName: .LingohubDidUpdateLocalization,
+            forName: .LingoHubDidUpdateLocalization,
             object: nil,
             queue: .main
         ) { _ in

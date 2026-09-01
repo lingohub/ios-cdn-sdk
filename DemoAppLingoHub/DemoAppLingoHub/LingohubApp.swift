@@ -1,6 +1,6 @@
 //
-//  Test_App_LingohubApp.swift
-//  Test App Lingohub
+//  LingoHubApp.swift
+//  Test App LingoHub
 //
 //  Created by Manfred Baldauf on 12.03.25.
 //
@@ -9,14 +9,14 @@ import SwiftUI
 import Lingohub
 
 @main
-struct LingohubApp: App {
+struct LingoHubApp: App {
     @SwiftUI.Environment(\.scenePhase) private var scenePhase
 
     init() {
-        // Configure Lingohub SDK
-        LingohubSDK.shared.configure(withApiKey: "YOUR_API_KEY")
+        // Configure LingoHub SDK
+        LingoHubSDK.shared.configure(withApiKey: "YOUR_API_KEY")
 
-        LingohubSDK.shared.swizzleMainBundle()
+        LingoHubSDK.shared.swizzleMainBundle()
 
     }
 
@@ -27,7 +27,7 @@ struct LingohubApp: App {
         .onChange(of: scenePhase) { oldPhase, newPhase in
             if newPhase == .active {
                 // Check for updates when app becomes active
-                LingohubSDK.shared.update()
+                LingoHubSDK.shared.update()
 
             }
         }

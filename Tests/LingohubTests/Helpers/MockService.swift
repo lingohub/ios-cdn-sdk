@@ -10,7 +10,7 @@ import Mocker
 
 /// A service for mocking network responses
 public final class MockService {
-    private static let updateUrl = URL(string: LingohubConstants.basePath + "v1/distributions/check")!
+    private static let updateUrl = URL(string: LingoHubConstants.basePath + "v1/distributions/check")!
     private static let downloadUrl = URL(string: "https://s3.amazon.de/update.zip")!
 
     private static func loadResource(_ name: String, withExtension fileExtension: String) -> Data {

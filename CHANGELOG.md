@@ -4,8 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [1.1.0] - Unreleased
 
+### Changed (naming)
+- The public API was renamed to the LingoHub brand spelling: `LingoHubSDK`, `LingoHubSDKError`, and `.LingoHubDidUpdateLocalization`. Deprecated aliases for the 1.0.0 names are included, so existing code keeps compiling with warnings. The module name is unchanged (`import Lingohub`).
+
 ### Added
-- async/await variant of the update check: `try await LingohubSDK.shared.updateAsync()`. Named distinctly so existing fire-and-forget `update()` calls in async contexts keep compiling unchanged.
+- async/await variant of the update check: `try await LingoHubSDK.shared.updateAsync()`. Named distinctly so existing fire-and-forget `update()` calls in async contexts keep compiling unchanged.
+- `LingoHubSDKError.apiError` now carries the CDN's structured error codes as a third associated value (`errorCodes: [String]`, e.g. `CDN_KEY_NOT_FOUND`, `USAGE_LIMIT_EXCEEDED`), matching the Android SDK, so apps can react programmatically without parsing the message.
 - The language override set via `setLanguage(_:)` is now persisted and restored on the next launch. `setSystemLanguage()` removes it. (The previous implementation wrote to an ineffective defaults key and lost the override on relaunch.)
 - After an HTTP 429 (CDN usage budget exhausted), the SDK pauses further update checks for one hour instead of retrying on every call.
 
