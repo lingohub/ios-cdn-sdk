@@ -94,22 +94,23 @@ final class UpdateInstallerTests: XCTestCase {
         XCTAssertFalse(try stagingLeftoverExists())
     }
 
-    func testWrapperDirectoryArchiveIsHoistedAndUsable() async throws {
-        // "Zipped a folder" archives put everything under one wrapper directory.
-        // Runtime lookup resolves .lproj only at the bundle root, so the wrapper
-        // must be hoisted - otherwise a "successful" install would serve nothing.
+    func testWrapperDirectoryArchiveRejected() async throws {
+        // The CDN produces .lproj directories at the archive root - the only layout
+        // runtime lookup can resolve. A wrapper directory means the release was not
+        // produced by the CDN pipeline; it is rejected, keeping the previous release.
         let installer = UpdateInstaller()
-        let archive = try makeArchive(files: [
+        _ = try await installer.install(archiveURL: makeLocalizationArchive(value: "good"), liveBundleURL: liveBundleURL, expectedSha256: nil)
+
+        let wrapped = try makeArchive(files: [
             "MyBundle/en.lproj/Localizable.strings": Data("\"K\" = \"wrapped\";".utf8),
             "__MACOSX/._MyBundle": Data([0x00, 0x05])
         ])
 
-        _ = try await installer.install(archiveURL: archive, liveBundleURL: liveBundleURL, expectedSha256: nil)
-
-        XCTAssertEqual(liveValue(), "wrapped")
-        // The layout the runtime actually resolves: .lproj as a direct child
-        let bundle = try XCTUnwrap(Bundle(url: liveBundleURL))
-        XCTAssertNotNil(bundle.path(forResource: "en", ofType: "lproj"))
+        let error = await expectInstallError(installer, archiveURL: wrapped)
+        guard case .noLocalizationContent = error else {
+            return XCTFail("Expected noLocalizationContent, got \(String(describing: error))")
+        }
+        XCTAssertEqual(liveValue(), "good")
     }
 
     func testDoublyNestedLocalizationRejected() async throws {

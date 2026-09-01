@@ -27,7 +27,11 @@ actor UpdateInstaller {
     struct Limits: Sendable {
         var maxCompressedSize: Int64 = 50 * 1024 * 1024        // 50 MB archive
         var maxUncompressedSize: Int64 = 200 * 1024 * 1024     // 200 MB extracted
-        var maxEntryCount = 10_000
+        // Generous: a large app (100+ tables × 100+ languages, plus per-entry archive
+        // junk) stays well below this, while iterating the central directory to count
+        // this many entries is still cheap. The uncompressed-size cap is the real
+        // compression-bomb guard.
+        var maxEntryCount = 100_000
     }
 
     enum InstallError: Error, LocalizedError {
@@ -94,7 +98,6 @@ actor UpdateInstaller {
         do {
             LingoHubLogger.shared.log("Installer: extracting archive to staging at \(stagingURL.lastPathComponent)")
             try fileManager.unzipItem(at: archiveURL, to: stagingURL)
-            try hoistWrapperDirectoryIfNeeded(at: stagingURL)
             try validateStagedBundle(at: stagingURL)
 
             // Downloaded translations are re-downloadable; the exclusion travels
@@ -188,43 +191,16 @@ actor UpdateInstaller {
         return isDirectory.boolValue
     }
 
-    /// Normalizes the common "zipped a folder" archive shape: when the staging root
-    /// contains no `.lproj` directories but exactly one real directory that does, that
-    /// wrapper's contents are hoisted to the root. Runtime lookup resolves `.lproj`
-    /// folders only at the bundle root, so a wrapper left in place would produce a
-    /// "successfully" installed release that serves nothing.
-    private func hoistWrapperDirectoryIfNeeded(at stagingURL: URL) throws {
-        let fileManager = FileManager.default
-        let entries = (try? fileManager.contentsOfDirectory(at: stagingURL, includingPropertiesForKeys: nil))?
-            .filter { !isJunk($0) } ?? []
-
-        guard !entries.contains(where: { $0.lastPathComponent.hasSuffix(".lproj") }),
-              entries.count == 1,
-              let wrapper = entries.first,
-              isDirectory(wrapper) else {
-            return
-        }
-
-        let children = try fileManager.contentsOfDirectory(at: wrapper, includingPropertiesForKeys: nil)
-        guard children.contains(where: { $0.lastPathComponent.hasSuffix(".lproj") }) else {
-            return
-        }
-
-        LingoHubLogger.shared.log("Installer: hoisting wrapper directory '\(wrapper.lastPathComponent)'")
-        for child in children {
-            try fileManager.moveItem(at: child, to: stagingURL.appendingPathComponent(child.lastPathComponent))
-        }
-        try? fileManager.removeItem(at: wrapper)
-    }
-
     /// A release is usable when the staging root contains at least one `<lang>.lproj`
     /// directory holding at least one valid `.strings`/`.stringsdict` file — the exact
     /// layout runtime lookup resolves (`Bundle.path(forResource:ofType:)` finds `.lproj`
-    /// folders only at the bundle root). Validation applies the same contracts the
-    /// loaders apply later: `.strings` must cast to `[String: String]` (the cast
-    /// `loadStringsTable` performs), `.stringsdict` must be a dictionary plist.
-    /// Any violation means the CDN produced a broken release; rejecting it keeps the
-    /// previous, working translations active.
+    /// folders only at the bundle root), and the only layout the LingoHub CDN produces.
+    /// Anything else — including localizations nested under wrapper directories — is
+    /// rejected. Validation applies the same contracts the loaders apply later:
+    /// `.strings` must cast to `[String: String]` (the cast `loadStringsTable`
+    /// performs), `.stringsdict` must be a dictionary plist. Any violation means the
+    /// CDN produced a broken release; rejecting it keeps the previous, working
+    /// translations active.
     private func validateStagedBundle(at stagingURL: URL) throws {
         let fileManager = FileManager.default
         let rootEntries = (try? fileManager.contentsOfDirectory(at: stagingURL, includingPropertiesForKeys: nil)) ?? []
