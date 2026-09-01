@@ -159,6 +159,57 @@ final class LingoHubSDKTests: XCTestCase {
         XCTAssertNil(UserDefaults.standard.string(forKey: LingoHubConstants.languageOverride))
     }
 
+    func testCurrentLanguageCode() async throws {
+        // Given
+        sut.configureForTests()
+
+        // When an override is active
+        sut.setLanguage("de")
+
+        // Then both properties expose it
+        XCTAssertEqual(sut.language, "de")
+        XCTAssertEqual(sut.currentLanguageCode, "de")
+
+        // When following the system language
+        sut.setSystemLanguage()
+
+        // Then the override is nil while the served language falls back to the system
+        XCTAssertNil(sut.language)
+        XCTAssertEqual(sut.currentLanguageCode, Locale.lingohubLanguageCode)
+    }
+
+    func testInvalidUrlMapsToStatusZero() async throws {
+        // Local failures with no response use apiError(statusCode: 0, ...) too.
+        // The space in the host makes URL creation fail before any request is sent.
+        sut.configureForTests()
+        let configuration = URLSessionConfiguration.default
+        configuration.protocolClasses = [MockingURLProtocol.self]
+        sut.apiClient = APIClient(basePath: "https://exa mple.com/", configuration: configuration)
+        defer { _ = LingoHubSDK.testInstance() } // restore the mocked API client
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success:
+                XCTFail()
+            case .failure(let error):
+                switch error {
+                case LingoHubSDKError.apiError(let statusCode, let message, let errorCodes):
+                    XCTAssertEqual(statusCode, 0)
+                    XCTAssertEqual(message, "Invalid request URL")
+                    XCTAssertEqual(errorCodes, [])
+                default:
+                    XCTFail("Expected apiError, got \(error)")
+                }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
+    }
+
     func testSystemLanguage() async throws {
         // Given
         sut.setLanguage("de")

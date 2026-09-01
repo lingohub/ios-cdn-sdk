@@ -25,11 +25,20 @@ import ZIPFoundation
     @objc var sdkVersion: String?
 
     /**
-     The language the SDK currently serves. Set via `setLanguage(_:)` / `setSystemLanguage()`.
+     The language override set via `setLanguage(_:)`, or `nil` when the SDK follows the
+     system language. For the language actually being served, use ``currentLanguageCode``.
      */
     @objc public var language: String? {
         get { cacheManager.language }
         set { cacheManager.language = newValue }
+    }
+
+    /**
+     The ISO 639-1 code of the language the SDK is currently serving: the override set
+     via `setLanguage(_:)`, or the system language when no override is active.
+     */
+    @objc public var currentLanguageCode: String? {
+        return effectiveLanguageCode
     }
 
     lazy var apiClient = APIClient(basePath: LingoHubConstants.basePath)
@@ -296,6 +305,12 @@ public extension LingoHubSDK {
                 // statusCode 0 per the documented apiError contract.
                 LingoHubLogger.shared.log("Network error: \(error.localizedDescription)")
                 result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: error.localizedDescription, errorCodes: [])))
+            } catch APIError.invalidURL {
+                LingoHubLogger.shared.log("Invalid request URL")
+                result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: "Invalid request URL", errorCodes: [])))
+            } catch APIError.invalidResponse {
+                LingoHubLogger.shared.log("Invalid response from the server")
+                result(.failure(LingoHubSDKError.apiError(statusCode: 0, message: "Invalid response from the server", errorCodes: [])))
             } catch {
                 LingoHubLogger.shared.log("Unexpected error: \(error)")
                 result(.failure(LingoHubSDKError.unknown))

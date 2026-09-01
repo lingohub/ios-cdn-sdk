@@ -57,8 +57,8 @@ struct ContentView: View {
         .padding()
         .onAppear {
             setupNotificationObserver()
-            // Initialize current language
-            if let language = LingoHubSDK.shared.language {
+            // Initialize with the language the SDK is currently serving
+            if let language = LingoHubSDK.shared.currentLanguageCode {
                 currentLanguage = language
             }
         }
