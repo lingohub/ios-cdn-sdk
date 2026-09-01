@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [2.0.0] - 2026-09-01
+## [2.0.0] - 2026-09-02
 
 2.0 is a reliability release: translation updates now install transactionally — a corrupt download, a full disk, or a crash mid-install can never break the translations your users are seeing — and all heavy work moved off the main thread. The public API was reduced to the surface that was always documented.
 

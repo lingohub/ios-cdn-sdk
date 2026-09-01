@@ -52,10 +52,9 @@ jobs:
     name: Public API diff
     if: github.event_name == 'pull_request'
     runs-on: macos-15
-    # Informational while 2.0 is being assembled; make this job blocking
-    # (remove continue-on-error) once v2.0.0 is tagged, so unintended changes
-    # to the public API surface fail the PR.
-    continue-on-error: true
+    # Blocking since v2.0.0: an unintended change to the public API surface
+    # fails the PR. Intentional breaks belong in a major release, reviewed
+    # against this job's output.
     steps:
       - uses: actions/checkout@v4
         with:
