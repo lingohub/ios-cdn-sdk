@@ -6,18 +6,20 @@
 
 import Foundation
 
-class CacheManager {
+/// Throttles update checks so the app doesn't hit the CDN on every foreground
+/// transition — the check pattern recommended in the SDK README.
+class UpdateThrottle {
     private let userDefaults = UserDefaults.standard
     private let lastFetchKey = "last_fetch_time"
     private let oneDayInSeconds: TimeInterval = 24 * 60 * 60
 
-    func shouldFetchStrings() -> Bool {
+    func shouldCheckForUpdates() -> Bool {
         let lastFetchTime = userDefaults.double(forKey: lastFetchKey)
         let currentTime = Date().timeIntervalSince1970
         return currentTime - lastFetchTime >= oneDayInSeconds
     }
 
-    func updateLastFetchTime() {
+    func markCheckedNow() {
         let currentTime = Date().timeIntervalSince1970
         userDefaults.set(currentTime, forKey: lastFetchKey)
     }

@@ -14,18 +14,68 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: swift build
+      # SDK sources must be completely free of strict-concurrency diagnostics —
+      # these are the warnings that become errors in the Swift 6 language mode,
+      # so this step is what keeps the project itself Swift-6-ready while the
+      # swift6-mode job below only tracks the ZIPFoundation dependency.
+      - name: Build (strict concurrency, no SDK warnings)
+        run: |
+          set -o pipefail
+          swift build -Xswiftc -strict-concurrency=complete 2>&1 | tee strict-build.log
+          if grep -E "Sources/Lingohub/.*warning" strict-build.log; then
+            echo "::error::SDK sources produce strict-concurrency warnings (errors under Swift 6)"
+            exit 1
+          fi
       - name: Test
         run: swift test
 
-  build-ios:
-    name: Build (iOS Simulator)
+  test-ios:
+    name: Test (iOS Simulator)
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-      - name: Build
+      - name: Select simulator
+        id: sim
         run: |
-          xcodebuild build \
+          UDID=$(xcrun simctl list devices available --json | jq -r '[.devices[] | .[] | select(.isAvailable) | select(.name | startswith("iPhone"))] | .[0].udid')
+          echo "Selected simulator: $UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+      - name: Test
+        run: |
+          xcodebuild test \
             -scheme Lingohub \
-            -destination 'generic/platform=iOS Simulator' \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
             -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO
+
+  api-diff:
+    name: Public API diff
+    if: github.event_name == 'pull_request'
+    runs-on: macos-15
+    # Informational while 2.0 is being assembled; make this job blocking
+    # (remove continue-on-error) once v2.0.0 is tagged, so unintended changes
+    # to the public API surface fail the PR.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Diagnose API breaking changes vs merge base
+        run: |
+          BASE=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          echo "Comparing against merge base $BASE"
+          swift package diagnose-api-breaking-changes "$BASE"
+
+  swift6-mode:
+    name: Swift 6 language mode (tracking)
+    runs-on: macos-15
+    # ZIPFoundation 0.9.x contains concurrency-unsafe mutable globals that fail
+    # under the Swift 6 language mode; the build stops there before SDK sources
+    # are even reached. This job tracks when the dependency becomes Swift-6-clean
+    # and never blocks a merge. SDK sources themselves are held to zero
+    # strict-concurrency warnings by the blocking step in test-macos above.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build in Swift 6 mode
+        run: swift build -Xswiftc -swift-version -Xswiftc 6

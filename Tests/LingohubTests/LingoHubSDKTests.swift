@@ -82,40 +82,27 @@ final class LingoHubSDKTests: XCTestCase {
     func testParsing() async throws {
         // Given
         guard let url = Bundle.module.url(forResource: "update_200", withExtension: "json"),
-              let data = try? Data(contentsOf: url)else {
+              let data = try? Data(contentsOf: url) else {
             XCTFail()
             return
         }
 
         // When
-        let endpoint = Endpoint<BundleInfo>(method: .get, path: "", parameters: [:], headers: [:]) { data in
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .custom { decoder in
-                let container = try decoder.singleValueContainer()
-                let timestamp = try container.decode(Int64.self)
-                return Date(timeIntervalSince1970: TimeInterval(timestamp) / 1000.0)
-            }
-            return try decoder.decode(BundleInfo.self, from: data)
-        }
+        let bundleInfo = try JSONDecoder().decode(BundleInfo.self, from: data)
 
         // Then
-        do {
-            let bundleInfo = try endpoint.decode(data)
-            XCTAssertEqual(bundleInfo.id, "test-bundle-id")
-            XCTAssertEqual(bundleInfo.name, "Test Bundle")
-            if #available(iOS 14.0, *) {
-                XCTAssertEqual(bundleInfo.filesUrl, URL(string: "https://s3.amazon.de/update.zip"))
-            } else {
-                // Fallback on earlier versions
-            }
+        XCTAssertEqual(bundleInfo.id, "test-bundle-id")
+        XCTAssertEqual(bundleInfo.name, "Test Bundle")
+        XCTAssertEqual(bundleInfo.filesUrl, URL(string: "https://s3.amazon.de/update.zip"))
+    }
 
-            let iso8601Formatter = ISO8601DateFormatter()
-            iso8601Formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let date = iso8601Formatter.date(from: "2025-03-13T13:55:22.028+00:00")
+    func testParsingRejectsMissingFilesUrl() async throws {
+        // A 200 response without a download URL is malformed and must fail decoding
+        // instead of being silently accepted.
+        let json = Data(#"{"distributionReleaseId": "id", "name": "Bundle"}"#.utf8)
 
-            XCTAssertEqual(bundleInfo.createdAt, date)
-        } catch {
-            XCTFail()
+        XCTAssertThrowsError(try JSONDecoder().decode(BundleInfo.self, from: json)) { error in
+            XCTAssertTrue(error is DecodingError, "Expected DecodingError, got \(error)")
         }
     }
 
@@ -557,10 +544,11 @@ final class LingoHubSDKTests: XCTestCase {
 
         // When/Then
         do {
-            try sut.useUpdatedBundle(atURL: TestConstants.updateBundleURL, withIdentifier: LingoHubConstants.distributionVersion, appVersion: TestConstants.appVersion)
-            XCTAssertEqual(sut.distributionVersion, LingoHubConstants.distributionVersion)
+            try await sut.installArchive(at: TestConstants.updateBundleURL, identifier: TestConstants.bundleIdentifier, appVersion: TestConstants.appVersion)
+            XCTAssertEqual(sut.distributionVersion, TestConstants.bundleIdentifier)
+            XCTAssertTrue(sut.isUpdatedBundleUsed)
         } catch {
-            XCTFail()
+            XCTFail("\(error)")
         }
     }
 
@@ -595,7 +583,7 @@ final class LingoHubSDKTests: XCTestCase {
         XCTAssertNil(stringBefore)
 
         // When
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
         sut.swizzleBundle(Bundle.module)
         let stringAfter = sut.localizedString(forKey: "StringPlain")
 
@@ -608,7 +596,7 @@ final class LingoHubSDKTests: XCTestCase {
         sut.setLanguage("en") // independent of the host's system language
         XCTAssertEqual(sut.swizzledBundles.count, 0)
 
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
 
         // Unswizzled lookups resolve via the system mechanism, so the expected value
         // depends on which localization the test bundle picks for this host.
@@ -631,7 +619,7 @@ final class LingoHubSDKTests: XCTestCase {
     func testAddedString() async throws {
         sut.configureForTests()
         sut.setLanguage("en") // independent of the host's system language
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
 
         let stringBefore = String.localized("OtherString", tableName: "Other")
 
@@ -646,7 +634,7 @@ final class LingoHubSDKTests: XCTestCase {
         // Given
         sut.configureForTests()
         sut.setLanguage("en") // independent of the host's system language
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
         // Remove swizzling of Bundle.module
         // sut.swizzleBundle(Bundle.module)
 
@@ -663,7 +651,7 @@ final class LingoHubSDKTests: XCTestCase {
     func testLanguage() async throws {
         // Given
         sut.configureForTests()
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
         sut.swizzleBundle(Bundle.module)
 
         // Debug bundle resources
@@ -700,7 +688,7 @@ final class LingoHubSDKTests: XCTestCase {
         // Given
         sut.configureForTests()
         sut.setLanguage("en")
-        sut.installUpdatedBundle()
+        await sut.installUpdatedBundle()
         sut.swizzleBundle(Bundle.module)
 
         // When: hammer the swizzled lookup from many threads at once

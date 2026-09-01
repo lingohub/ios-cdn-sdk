@@ -56,26 +56,18 @@ struct ContentView: View {
         }
         .padding()
         .onAppear {
-            setupNotificationObserver()
             // Initialize with the language the SDK is currently serving
             if let language = LingoHubSDK.shared.currentLanguageCode {
                 currentLanguage = language
             }
         }
-        .id(refreshTrigger) // Force view refresh when this changes
-    }
-
-    private func setupNotificationObserver() {
-        NotificationCenter.default.removeObserver(self, name: .LingoHubDidUpdateLocalization, object: nil)
-
-        NotificationCenter.default.addObserver(
-            forName: .LingoHubDidUpdateLocalization,
-            object: nil,
-            queue: .main
-        ) { _ in
-            // Toggle state to force view refresh
-            self.refreshTrigger.toggle()
+        // Refresh the view whenever LingoHub activates new translations.
+        // SwiftUI manages this subscription's lifetime, so repeated appearances
+        // don't accumulate observers.
+        .onReceive(NotificationCenter.default.publisher(for: .LingoHubDidUpdateLocalization).receive(on: RunLoop.main)) { _ in
+            refreshTrigger.toggle()
         }
+        .id(refreshTrigger) // Force view refresh when this changes
     }
 }
 

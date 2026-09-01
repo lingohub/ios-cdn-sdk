@@ -21,12 +21,11 @@ public extension LingoHubSDK {
         configure(withApiKey: TestConstants.apiKey, appVersion: TestConstants.appVersion)
     }
 
-   func installUpdatedBundle() {
+    func installUpdatedBundle() async {
         do {
-            try useUpdatedBundle(atURL: TestConstants.updateBundleURL, withIdentifier: TestConstants.bundleIdentifier, appVersion: TestConstants.appVersion)
+            try await installArchive(at: TestConstants.updateBundleURL, identifier: TestConstants.bundleIdentifier, appVersion: TestConstants.appVersion)
         } catch {
             print("[LingoHub] \(error)")
-
         }
     }
 

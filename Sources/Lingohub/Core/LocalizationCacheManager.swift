@@ -6,22 +6,39 @@
 
 import Foundation
 
+/// The complete, immutable description of an active downloaded release.
+///
+/// All state that decides how a localization lookup behaves lives in one value that
+/// is swapped atomically: readers either see the previous release or the new one,
+/// never a mix of filesystem, UserDefaults, and cache state.
+struct LocalizationSnapshot {
+    let bundle: Bundle
+    let bundleURL: URL
+    let distributionVersion: String
+    let appVersion: String
+}
+
 /// Thread-safe store for the localization state the SDK shares with the swizzled
 /// `Bundle.localizedString(forKey:value:table:)` implementation.
 ///
 /// `NSLocalizedString` can be called from any thread, so everything in here must be
-/// safe to access without main-actor isolation: mutable state is protected by a lock,
-/// and the remaining facts come from `UserDefaults` and `FileManager`, which are
-/// thread-safe by contract.
+/// safe to access without main-actor isolation: all mutable state is protected by a
+/// lock. The hot path (`getString`, `languageBundle(for:)`, `isUpdateActive`) never
+/// touches the filesystem or UserDefaults — it only reads the in-memory snapshot.
 final class LocalizationCacheManager: @unchecked Sendable {
 
     static let shared = LocalizationCacheManager()
 
     private let lock = NSLock()
 
+    /// The active downloaded release, or nil when lookups should use the app bundle only.
+    private var _snapshot: LocalizationSnapshot?
     // Internal cache for loaded strings [Language: [TableName: [Key: Value]]]
     private var localizationCache: [String: [String: [String: String]]] = [:]
-    // Bumped on every clearCache() so in-flight table loads from a previous
+    // Resolved per-language bundles inside the active release (`<lang>.lproj`, or the
+    // release root when the language folder is missing).
+    private var languageBundleCache: [String: Bundle] = [:]
+    // Bumped on every cache clear so in-flight table loads from a previous
     // bundle can't be written back into the freshly cleared cache.
     private var cacheGeneration: UInt64 = 0
     private var _language: String?
@@ -47,7 +64,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     // MARK: - Shared state
 
-    /// The language override (or system language) the SDK currently uses.
+    /// The language override (or nil to follow the system language).
     var language: String? {
         get { lock.lh_withLock { _language } }
         set { lock.lh_withLock { _language = newValue } }
@@ -63,19 +80,102 @@ final class LocalizationCacheManager: @unchecked Sendable {
         return lock.lh_withLock { _swizzledBundlePaths.contains(bundlePath) }
     }
 
-    // MARK: - Update bundle facts (UserDefaults + FileManager, thread-safe)
+    // MARK: - Active release snapshot
+
+    var currentSnapshot: LocalizationSnapshot? {
+        return lock.lh_withLock { _snapshot }
+    }
+
+    /// Whether a downloaded update bundle is active and should be used for lookups.
+    var isUpdateActive: Bool {
+        return currentSnapshot != nil
+    }
 
     var distributionVersion: String? {
-        return UserDefaults.standard.string(forKey: LingoHubConstants.distributionVersion)
+        return currentSnapshot?.distributionVersion
     }
 
     var updateAppVersion: String? {
-        return UserDefaults.standard.string(forKey: LingoHubConstants.appVersion)
+        return currentSnapshot?.appVersion
     }
 
-    /// Whether a downloaded update bundle is present and should be used for lookups.
-    var isUpdateActive: Bool {
-        return distributionVersion != nil && updateAppVersion != nil && updateBundleExists
+    var updateBundle: Bundle? {
+        return currentSnapshot?.bundle
+    }
+
+    /// Publishes a freshly installed release as the active snapshot and clears all
+    /// caches, as one transaction: a reader either sees the old release with the old
+    /// cache or the new release with an empty cache.
+    ///
+    /// - Returns: false when no `Bundle` can be created at `bundleURL`.
+    @discardableResult
+    func activate(bundleURL: URL, distributionVersion: String, appVersion: String) -> Bool {
+        guard let bundle = Bundle(url: bundleURL) else {
+            LingoHubLogger.shared.log("Cache Manager: could not create Bundle at \(bundleURL.path)")
+            return false
+        }
+        let snapshot = LocalizationSnapshot(
+            bundle: bundle,
+            bundleURL: bundleURL,
+            distributionVersion: distributionVersion,
+            appVersion: appVersion
+        )
+        lock.lh_withLock {
+            _snapshot = snapshot
+            localizationCache.removeAll()
+            languageBundleCache.removeAll()
+            cacheGeneration &+= 1
+        }
+        LingoHubLogger.shared.log("Cache Manager: activated release \(distributionVersion)")
+        return true
+    }
+
+    /// Removes the active snapshot and clears all caches. Lookups fall back to the
+    /// original app bundle afterwards.
+    func deactivate() {
+        lock.lh_withLock {
+            _snapshot = nil
+            localizationCache.removeAll()
+            languageBundleCache.removeAll()
+            cacheGeneration &+= 1
+        }
+    }
+
+    /// Rebuilds the snapshot from persisted metadata and the bundle on disk, healing
+    /// any partial state a crash may have left behind:
+    /// - metadata without a usable bundle → metadata is cleared, no update active
+    /// - a bundle without metadata → the unreferenced bundle is deleted
+    func restoreFromDisk() {
+        let defaults = UserDefaults.standard
+        let distributionVersion = defaults.string(forKey: LingoHubConstants.distributionVersion)
+        let appVersion = defaults.string(forKey: LingoHubConstants.appVersion)
+
+        guard let distributionVersion, let appVersion else {
+            if let bundleURL = updateBundleUrl, FileManager.default.fileExists(atPath: bundleURL.path) {
+                LingoHubLogger.shared.log("Cache Manager: removing unreferenced update bundle")
+                try? FileManager.default.removeItem(at: bundleURL)
+            }
+            deactivate()
+            return
+        }
+
+        guard let bundleURL = updateBundleUrl,
+              bundleLooksUsable(at: bundleURL),
+              activate(bundleURL: bundleURL, distributionVersion: distributionVersion, appVersion: appVersion) else {
+            LingoHubLogger.shared.log("Cache Manager: persisted release \(distributionVersion) is missing or unusable, clearing state")
+            defaults.removeObject(forKey: LingoHubConstants.distributionVersion)
+            defaults.removeObject(forKey: LingoHubConstants.appVersion)
+            deactivate()
+            return
+        }
+    }
+
+    /// A cheap structural check for a restored bundle: the directory exists and holds
+    /// at least one `.lproj`. Freshly installed releases are fully validated by the
+    /// installer before activation; this only guards against partial pre-2.0 leftovers.
+    private func bundleLooksUsable(at url: URL) -> Bool {
+        let contents = try? FileManager.default.contentsOfDirectory(atPath: url.path)
+        return contents?.contains { $0.hasSuffix(".lproj") } ?? false
     }
 
     // MARK: - Cache Management
@@ -87,23 +187,22 @@ final class LocalizationCacheManager: @unchecked Sendable {
     ///   - language: The ISO language code (e.g., "en", "de").
     /// - Returns: The localized string, or nil if not found.
     func getString(forKey key: String, tableName: String?, language inputLanguage: String?) -> String? {
-        guard isUpdateActive else {
-            // No update bundle in use, skip the custom cache.
-            return nil
-        }
-
-        // Determine the language and table name to use
-        let effectiveLanguage = inputLanguage ?? language ?? Locale.lingohubLanguageCode ?? "en"
         let effectiveTableName = tableName ?? "Localizable" // Default table name
 
-        LingoHubLogger.shared.log("Cache Manager: Attempting get string '\(key)' table '\(effectiveTableName)' lang '\(effectiveLanguage)'")
-
-        // 1. Check the cache. `nil` table entry means the table was never loaded;
-        //    a present table with a missing key means the key doesn't exist.
-        var tableWasLoaded = false
+        // 1. Capture the snapshot, its generation, and the cache read under ONE lock
+        //    acquisition. Reading them separately would let an activate() slip in
+        //    between, after which a table loaded from the old release could pass the
+        //    generation guard and be cached for the new release indefinitely.
+        var snapshot: LocalizationSnapshot?
         var generation: UInt64 = 0
+        var tableWasLoaded = false
+        var effectiveLanguage = ""
         let cachedString: String? = lock.lh_withLock {
+            guard let current = _snapshot else { return nil }
+            snapshot = current
             generation = cacheGeneration
+            // `_language` directly: the `language` accessor takes this (non-recursive) lock.
+            effectiveLanguage = inputLanguage ?? _language ?? Locale.lingohubLanguageCode ?? "en"
             if let table = localizationCache[effectiveLanguage]?[effectiveTableName] {
                 tableWasLoaded = true
                 return table[key]
@@ -111,19 +210,22 @@ final class LocalizationCacheManager: @unchecked Sendable {
             return nil
         }
 
+        guard let snapshot else {
+            // No update bundle in use, skip the custom cache.
+            return nil
+        }
+
         if let cachedString = cachedString {
-            LingoHubLogger.shared.log("Cache Manager: Hit for key '\(key)'")
             return cachedString
         }
         if tableWasLoaded {
-            LingoHubLogger.shared.log("Cache Manager: Table '\(effectiveTableName)' lang '\(effectiveLanguage)' loaded previously, but key '\(key)' missing.")
             return nil
         }
 
         // 2. Load the .strings file for the language and table from the update bundle.
         //    Loading happens outside the lock; concurrent loads are idempotent.
         LingoHubLogger.shared.log("Cache Manager: Miss for table '\(effectiveTableName)' lang '\(effectiveLanguage)'. Attempting to load.")
-        let loadedTable = loadStringsTable(tableName: effectiveTableName, language: effectiveLanguage)
+        let loadedTable = loadStringsTable(tableName: effectiveTableName, language: effectiveLanguage, from: snapshot.bundle)
 
         lock.lh_withLock {
             // Only store the table if the cache wasn't cleared while we were loading,
@@ -133,21 +235,12 @@ final class LocalizationCacheManager: @unchecked Sendable {
             }
         }
 
-        let result = loadedTable[key]
-        if result == nil {
-            LingoHubLogger.shared.log("Cache Manager: Key '\(key)' not found in table '\(effectiveTableName)' lang '\(effectiveLanguage)'.")
-        }
-        return result
+        return loadedTable[key]
     }
 
-    /// Loads a `.strings` table from the update bundle. Returns an empty table when the
-    /// file is missing or unreadable, so failed lookups are cached and not retried.
-    private func loadStringsTable(tableName: String, language: String) -> [String: String] {
-        guard let updateBundle = self.updateBundle else {
-            LingoHubLogger.shared.log("Cache Manager: Update bundle not found, cannot load strings.")
-            return [:]
-        }
-
+    /// Loads a `.strings` table from the given release bundle. Returns an empty table
+    /// when the file is missing or unreadable, so failed lookups are cached and not retried.
+    private func loadStringsTable(tableName: String, language: String, from updateBundle: Bundle) -> [String: String] {
         guard let lprojPath = updateBundle.path(forResource: language, ofType: "lproj"),
               let lprojBundle = Bundle(path: lprojPath) else {
             LingoHubLogger.shared.log("Cache Manager: Could not find '\(language).lproj' in update bundle.")
@@ -159,7 +252,6 @@ final class LocalizationCacheManager: @unchecked Sendable {
             return [:]
         }
 
-        LingoHubLogger.shared.log("Cache Manager: Loading strings from: \(stringsFilePath)")
         guard let stringsDict = NSDictionary(contentsOfFile: stringsFilePath) as? [String: String] else {
             LingoHubLogger.shared.log("Cache Manager: Failed to load or parse '\(tableName).strings'")
             return [:]
@@ -169,10 +261,48 @@ final class LocalizationCacheManager: @unchecked Sendable {
         return stringsDict
     }
 
+    /// The language-specific bundle (`<language>.lproj`) inside the active release,
+    /// the release root when that language folder is missing, or nil when no release
+    /// is active. Resolutions are cached; the cache is dropped on activate/deactivate.
+    func languageBundle(for language: String?) -> Bundle? {
+        guard let language else { return currentSnapshot?.bundle }
+
+        // Snapshot, generation, and the cache read are captured under one lock
+        // acquisition, for the same reason as in getString: a bundle resolved from
+        // the old release must never be cached for the new one.
+        var snapshot: LocalizationSnapshot?
+        var generation: UInt64 = 0
+        let cached: Bundle? = lock.lh_withLock {
+            guard let current = _snapshot else { return nil }
+            snapshot = current
+            generation = cacheGeneration
+            return languageBundleCache[language]
+        }
+
+        guard let snapshot else { return nil }
+        if let cached { return cached }
+
+        let resolved: Bundle
+        if let lprojPath = snapshot.bundle.path(forResource: language, ofType: "lproj"),
+           let lprojBundle = Bundle(path: lprojPath) {
+            resolved = lprojBundle
+        } else {
+            resolved = snapshot.bundle
+        }
+
+        lock.lh_withLock {
+            if generation == cacheGeneration {
+                languageBundleCache[language] = resolved
+            }
+        }
+        return resolved
+    }
+
     /// Clears the internal localization cache.
     func clearCache() {
         lock.lh_withLock {
             localizationCache.removeAll()
+            languageBundleCache.removeAll()
             cacheGeneration &+= 1
         }
         LingoHubLogger.shared.log("Cache Manager: Internal localization cache cleared.")
@@ -182,7 +312,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     private static let updateBundleName = "update.bundle"
 
-    /// Checks if the update bundle file exists on disk.
+    /// Checks if the update bundle directory exists on disk.
     var updateBundleExists: Bool {
         guard let url = self.updateBundleUrl else {
             return false
@@ -207,15 +337,20 @@ final class LocalizationCacheManager: @unchecked Sendable {
         return updateBundleFolderUrl?.appendingPathComponent(LocalizationCacheManager.updateBundleName)
     }
 
-    /// The `Bundle` object representing the downloaded update bundle, or nil if it doesn't exist.
-    var updateBundle: Bundle? {
-        guard let bundleUrl = updateBundleUrl, updateBundleExists else {
-            return nil
-        }
-        return Bundle(url: bundleUrl)
-    }
-
     // MARK: - Storage housekeeping
+
+    /// Removes staging directories a crashed install may have left behind.
+    func removeStagingLeftovers() {
+        let fileManager = FileManager.default
+        guard let folderUrl = updateBundleFolderUrl,
+              let entries = try? fileManager.contentsOfDirectory(at: folderUrl, includingPropertiesForKeys: nil) else {
+            return
+        }
+        for entry in entries where entry.lastPathComponent.hasPrefix(LingoHubConstants.stagingDirectoryPrefix) {
+            LingoHubLogger.shared.log("Cache Manager: removing staging leftover \(entry.lastPathComponent)")
+            try? fileManager.removeItem(at: entry)
+        }
+    }
 
     /// Moves the update bundle folder from its legacy location (`Documents/LingoHub`,
     /// used by SDK 1.0.x) to Application Support and excludes it from backups.
