@@ -229,7 +229,7 @@ Or with async/await:
 
 ```swift
 do {
-    let updated = try await LingohubSDK.shared.update()
+    let updated = try await LingohubSDK.shared.updateAsync()
     if updated {
         // new translations are active, refresh your UI if needed
     }
@@ -237,8 +237,6 @@ do {
     print("Lingohub update failed: \(error.localizedDescription)")
 }
 ```
-
-> In an async context, a bare `update()` resolves to the async variant, so write `try await LingohubSDK.shared.update()` there. For fire-and-forget inside async code, use `update(result: nil)`.
 
 ### Reduce network requests
 

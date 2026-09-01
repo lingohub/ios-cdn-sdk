@@ -15,6 +15,8 @@ import Foundation
 /// The legacy `{"error_message": "..."}` format is still accepted as a fallback.
 struct ErrorResponse: Decodable {
     let message: String?
+    /// Structured error codes from the problem-details body (e.g. DISTRIBUTION_NOT_FOUND).
+    let infos: [String]
 
     private struct Problem: Decodable {
         struct ErrorDetail: Decodable {
@@ -36,11 +38,13 @@ struct ErrorResponse: Decodable {
     init(from decoder: Decoder) throws {
         if let legacy = try? Legacy(from: decoder) {
             message = legacy.errorMessage
+            infos = []
             return
         }
 
         let problem = try Problem(from: decoder)
         let infos = (problem.errors ?? []).flatMap { $0.infos ?? [] }
+        self.infos = infos
         switch (problem.detail, infos.isEmpty) {
         case (let detail?, false):
             message = "\(detail) (\(infos.joined(separator: ", ")))"

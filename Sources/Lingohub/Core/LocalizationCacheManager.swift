@@ -26,8 +26,24 @@ final class LocalizationCacheManager: @unchecked Sendable {
     private var cacheGeneration: UInt64 = 0
     private var _language: String?
     private var _swizzledBundlePaths: [String] = []
+    // Storage roots can be overridden (by tests) so nothing ever touches the real
+    // user directories; nil means the standard user-domain locations are used.
+    private var _storageRootOverride: URL?
+    private var _legacyStorageRootOverride: URL?
 
     init() {}
+
+    /// Replaces Application Support as the parent of the Lingohub folder. Test hook.
+    var storageRootOverride: URL? {
+        get { lock.lh_withLock { _storageRootOverride } }
+        set { lock.lh_withLock { _storageRootOverride = newValue } }
+    }
+
+    /// Replaces Documents as the parent of the legacy Lingohub folder. Test hook.
+    var legacyStorageRootOverride: URL? {
+        get { lock.lh_withLock { _legacyStorageRootOverride } }
+        set { lock.lh_withLock { _legacyStorageRootOverride = newValue } }
+    }
 
     // MARK: - Shared state
 
@@ -176,10 +192,14 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     /// The full URL to the Lingohub folder in Application Support, or nil if it can't be determined.
     var updateBundleFolderUrl: URL? {
-        guard let applicationSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return nil
-        }
-        return applicationSupport.appendingPathComponent(LingohubConstants.folderName)
+        let root = storageRootOverride ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        return root?.appendingPathComponent(LingohubConstants.folderName)
+    }
+
+    /// The Lingohub folder location used by SDK 1.0.x (in Documents).
+    var legacyUpdateBundleFolderUrl: URL? {
+        let root = legacyStorageRootOverride ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        return root?.appendingPathComponent(LingohubConstants.folderName)
     }
 
     /// The full URL to the `update.bundle` directory within the Lingohub folder.
@@ -201,7 +221,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
     /// used by SDK 1.0.x) to Application Support and excludes it from backups.
     func migrateLegacyStorageIfNeeded() {
         let fileManager = FileManager.default
-        guard let legacyUrl = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first?.appendingPathComponent(LingohubConstants.folderName),
+        guard let legacyUrl = legacyUpdateBundleFolderUrl,
               let currentUrl = updateBundleFolderUrl,
               legacyUrl != currentUrl,
               fileManager.fileExists(atPath: legacyUrl.path) else {

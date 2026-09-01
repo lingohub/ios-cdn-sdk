@@ -98,6 +98,16 @@ extension MockService {
         mock.register()
     }
 
+    /// A 404 without the CDN's DISTRIBUTION_NOT_FOUND problem body, e.g. from a
+    /// misconfigured proxy or wrong route.
+    @objc public static func mockUpdate404WithoutInfo() {
+        let data = loadResource("empty", withExtension: "json")
+        let mock = Mock(url: updateUrl, ignoreQuery: true, contentType: .json, statusCode: 404, data: [
+            .post: data
+        ])
+        mock.register()
+    }
+
     @objc public static func mockUpdate429() {
         let data = loadResource("update_429", withExtension: "json")
         let mock = Mock(url: updateUrl, ignoreQuery: true, contentType: .json, statusCode: 429, data: [

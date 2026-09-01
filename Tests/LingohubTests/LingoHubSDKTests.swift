@@ -12,9 +12,19 @@ import Mocker
 final class LingohubSDKTests: XCTestCase {
     let sut: LingohubSDK = LingohubSDK.testInstance()
 
+    private var testStorageRoot: URL?
+
     @MainActor
     override func setUp() async throws {
         try await super.setUp()
+
+        // Isolate all SDK storage in a unique temporary directory so the suite never
+        // reads or deletes real user directories (Documents, Application Support).
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("LingohubTests-\(UUID().uuidString)")
+        testStorageRoot = root
+        sut.cacheManager.storageRootOverride = root.appendingPathComponent("current")
+        sut.cacheManager.legacyStorageRootOverride = root.appendingPathComponent("legacy")
+
         // Start from a clean slate even if a previous (crashed) run left persisted state
         sut.reset()
     }
@@ -45,6 +55,14 @@ final class LingohubSDKTests: XCTestCase {
         XCTAssertFalse(sut.updateBundleExists)
         XCTAssertEqual(sut.environment, .production)
         XCTAssertEqual(sut.swizzledBundles, [])
+
+        // Drop the per-test storage isolation
+        sut.cacheManager.storageRootOverride = nil
+        sut.cacheManager.legacyStorageRootOverride = nil
+        if let root = testStorageRoot {
+            try? FileManager.default.removeItem(at: root)
+            testStorageRoot = nil
+        }
     }
 
     func testConfiguration() async throws {
@@ -310,7 +328,7 @@ final class LingohubSDKTests: XCTestCase {
         MockService.mockUpdate200()
         MockService.mockBundleDownload200()
 
-        let updated = try await sut.update()
+        let updated = try await sut.updateAsync()
 
         XCTAssertTrue(updated)
         XCTAssertEqual(sut.updateAppVersion, TestConstants.appVersion)
@@ -322,7 +340,7 @@ final class LingohubSDKTests: XCTestCase {
 
         MockService.mockUpdate204()
 
-        let updated = try await sut.update()
+        let updated = try await sut.updateAsync()
 
         XCTAssertFalse(updated)
     }
@@ -366,9 +384,39 @@ final class LingohubSDKTests: XCTestCase {
         await fulfillment(of: [secondExpectation], timeout: 3.0)
     }
 
+    func testUpdate404WithoutInfoRemainsError() async throws {
+        // Only the CDN's DISTRIBUTION_NOT_FOUND problem is normalized to "no update".
+        // A 404 without that structured body (wrong route, proxy misconfiguration)
+        // must stay a failure.
+        sut.configureForTests()
+
+        MockService.mockUpdate404WithoutInfo()
+
+        let expectation = XCTestExpectation()
+
+        sut.update { result in
+            switch result {
+            case .success:
+                XCTFail()
+            case .failure(let error):
+                switch error {
+                case LingohubSDKError.apiError(let statusCode, _):
+                    XCTAssertEqual(statusCode, 404)
+                default:
+                    XCTFail()
+                }
+            }
+
+            expectation.fulfill()
+        }
+
+        await fulfillment(of: [expectation], timeout: 3.0)
+    }
+
     func testUpdateNoReleasePublished() async throws {
-        // A 404 means no release matches the app version and no fallback exists.
-        // That is a normal state (e.g. nothing published yet), not an error.
+        // A 404 with the CDN's DISTRIBUTION_NOT_FOUND problem means no release matches
+        // the app version and no fallback exists. That is a normal state
+        // (e.g. nothing published yet), not an error.
         sut.configureForTests()
 
         MockService.mockUpdate404()
@@ -440,9 +488,8 @@ final class LingohubSDKTests: XCTestCase {
         // Create expectation for notification
         let expectation = expectation(forNotification: .LingohubDidUpdateLocalization, object: nil, handler: nil)
 
-        // When (in async contexts the bare `update()` resolves to the async overload,
-        // so pick the fire-and-forget closure variant explicitly)
-        sut.update(result: nil)
+        // When
+        sut.update()
 
         // Then
         await fulfillment(of: [expectation], timeout: 3.0)
@@ -589,21 +636,13 @@ final class LingohubSDKTests: XCTestCase {
     }
 
     func testLegacyStorageMigration() async throws {
+        // Runs entirely inside the per-test temporary storage roots configured in setUp,
+        // so no real user directory is ever touched or deleted.
         let fileManager = FileManager.default
-        guard let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first,
+        guard let legacyFolder = sut.cacheManager.legacyUpdateBundleFolderUrl,
               let newFolder = sut.cacheManager.updateBundleFolderUrl else {
             XCTFail()
             return
-        }
-        let legacyFolder = documents.appendingPathComponent(LingohubConstants.folderName)
-
-        // Don't touch a real legacy folder if one exists outside this test
-        try XCTSkipIf(fileManager.fileExists(atPath: legacyFolder.path), "Legacy folder already present on this machine")
-
-        try? fileManager.removeItem(at: newFolder)
-        defer {
-            try? fileManager.removeItem(at: legacyFolder)
-            try? fileManager.removeItem(at: newFolder)
         }
 
         // Given: a folder as written by SDK 1.0.x
@@ -613,7 +652,7 @@ final class LingohubSDKTests: XCTestCase {
         // When
         sut.configureForTests()
 
-        // Then: the folder moved to Application Support
+        // Then: the folder moved to the current storage location
         XCTAssertFalse(fileManager.fileExists(atPath: legacyFolder.path))
         XCTAssertTrue(fileManager.fileExists(atPath: newFolder.appendingPathComponent("marker.txt").path))
     }

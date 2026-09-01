@@ -172,11 +172,14 @@ public extension LingohubSDK {
      Check if there are any localization updates available for your app on Lingohub,
      using Swift concurrency.
 
+     Named distinctly from `update(result:)` so that existing fire-and-forget
+     `update()` calls in async contexts keep compiling unchanged.
+
      - Returns: `true` if new translations were downloaded and are active, `false` if there was nothing new.
      - Throws: `LingohubSDKError` when the update check fails.
      */
     @discardableResult
-    func update() async throws -> Bool {
+    func updateAsync() async throws -> Bool {
         try await withCheckedThrowingContinuation { continuation in
             checkForUpdate { result in
                 continuation.resume(with: result)
@@ -246,7 +249,7 @@ public extension LingohubSDK {
        LingohubLogger.shared.log("Environment: \(environment)")
        LingohubLogger.shared.log("Device ID: \(deviceIdentifier ?? "nil")")
 
-        apiClient.checkForUpdates(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion, distributionVersion: distributionVersion, environment: environment, deviceIdentifier: deviceIdentifier, languageCode: language) { [weak self] response in
+        apiClient.checkForUpdates(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion, distributionVersion: distributionVersion, environment: environment, deviceIdentifier: deviceIdentifier, languageCode: effectiveLanguageCode) { [weak self] response in
             do {
                 let bundleInfo = try response()
                 LingohubLogger.shared.log("Bundle info received: \(bundleInfo)")
@@ -270,12 +273,13 @@ public extension LingohubSDK {
             } catch APIError.noContent {
                 LingohubLogger.shared.log("No content available for update")
                 result(.success(false))
-            } catch APIError.apiError(let statusCode, _) where statusCode == 404 {
-                // 404 means no release matches this app version and no fallback release exists
-                // (e.g. nothing has been published yet). That is a normal state, not an error.
-                LingohubLogger.shared.log("No distribution release available for this app (404)")
+            } catch APIError.apiError(404, _, let infos) where infos.contains("DISTRIBUTION_NOT_FOUND") {
+                // The CDN's DISTRIBUTION_NOT_FOUND means no release matches this app version
+                // and no fallback release exists (e.g. nothing has been published yet).
+                // That is a normal state, not an error. Any other 404 stays a failure.
+                LingohubLogger.shared.log("No distribution release available for this app (404 DISTRIBUTION_NOT_FOUND)")
                 result(.success(false))
-            } catch APIError.apiError(let statusCode, let message) {
+            } catch APIError.apiError(let statusCode, let message, _) {
                 LingohubLogger.shared.log("API error: Status \(statusCode), Message: \(message ?? "No message")")
                 if statusCode == 429 {
                     // Usage budget exhausted; pause update checks client-side.
@@ -325,7 +329,7 @@ public extension LingohubSDK {
                         try self.useUpdatedBundle(atURL: temporaryUrl, withIdentifier: identifier, appVersion: appVersion)
                         LingohubLogger.shared.log("Bundle successfully updated")
                         result(.success(true))
-                    } catch APIError.apiError(let statusCode, let message) {
+                    } catch APIError.apiError(let statusCode, let message, _) {
                         LingohubLogger.shared.log("API error during extraction: \(statusCode), \(message ?? "No message")")
                         result(.failure(LingohubSDKError.apiError(statusCode: statusCode, message: message)))
                     } catch {
@@ -333,7 +337,7 @@ public extension LingohubSDK {
                         result(.failure(LingohubSDKError.apiError(statusCode: 0, message: "Failed to extract bundle: \(error.localizedDescription)")))
                     }
                 }
-            } catch APIError.apiError(let statusCode, let message) {
+            } catch APIError.apiError(let statusCode, let message, _) {
                 LingohubLogger.shared.log("API error during download: \(statusCode), \(message ?? "No message")")
                 result(.failure(LingohubSDKError.apiError(statusCode: statusCode, message: message)))
             } catch {
@@ -392,6 +396,12 @@ extension LingohubSDK {
 
     @objc var updateAppVersion: String? {
         return cacheManager.updateAppVersion
+    }
+
+    /// The language the SDK is effectively serving: the override if set, otherwise the
+    /// system language. Sent to the CDN so request metadata matches lookup behavior.
+    var effectiveLanguageCode: String? {
+        return language ?? Locale.lingohubLanguageCode
     }
 
     /// The point in time until which update checks are paused after a 429 response.
