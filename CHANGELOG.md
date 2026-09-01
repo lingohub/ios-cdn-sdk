@@ -6,8 +6,8 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 - Parse the CDN's current RFC 7807 error responses (`detail` + `errors[].infos`), so API errors carry a meaningful message again. The legacy `error_message` format is still supported as a fallback.
-- Send the client language as `clientLanguageCode` (the field the CDN reads); previously the value was sent under a name the API ignores. The language override set via `setLanguage(_:)` is now reported instead of always the system locale.
-- Treat HTTP 404 from the update check (no release matches the app version and no fallback release exists, e.g. nothing published yet) as "no update available" instead of an error.
+- Send the client language as `clientLanguageCode` (the field the CDN reads); previously the value was sent under a name the API ignores. The effective language is reported: the `setLanguage(_:)` override when set, otherwise the system language - matching lookup behavior.
+- Treat the CDN's 404 `DISTRIBUTION_NOT_FOUND` response from the update check (no release matches the app version and no fallback release exists, e.g. nothing published yet) as "no update available" instead of an error. Other 404s remain failures.
 - Report the real SDK version to the CDN. Previously the host app's version was sent, because `Bundle(for:)` resolves to the app bundle under SwiftPM.
 - `Package.swift` declared macOS 10.15, but `os.Logger` requires macOS 11 — the package failed to compile for macOS (including `swift build`/`swift test`). Now declares macOS 11.
 - `swizzleBundle(_:)` now adds to the set of swizzled bundles instead of replacing it; swizzling a second bundle no longer un-registers the first.
