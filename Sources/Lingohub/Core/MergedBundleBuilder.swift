@@ -111,12 +111,12 @@ struct MergedBundleBuilder: Sendable {
     let folder: URL
 
     /// Builds the merged bundle from the release files at `releaseURL` (a validated
-    /// staging directory during an install, `update.bundle` at launch) and returns it
-    /// opened.
+    /// staging directory during an install, the restored release at launch) and returns
+    /// it opened.
     func build(from releaseURL: URL) throws -> MergedBundle {
         let fileManager = FileManager.default
-        // `folder` lives next to the release. When the release was discarded while this
-        // build waited, stop instead of recreating the storage folder.
+        // `folder` shares the LingoHub folder with the releases. When the release was
+        // discarded while this build waited, stop instead of recreating that folder.
         guard releaseURL.lh_isDirectory else {
             throw BuildError.releaseMissing
         }

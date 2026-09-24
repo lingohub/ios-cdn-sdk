@@ -490,8 +490,9 @@ final class LocalizationCacheManager: @unchecked Sendable {
         return updateBundleFolderUrl?.appendingPathComponent(LocalizationCacheManager.fixedUpdateBundleName, isDirectory: true)
     }
 
-    /// The folder merged bundles (`<id>.bundle`) are built in, next to `update.bundle`,
-    /// so they share its backup exclusion and are discarded along with it.
+    /// The folder merged bundles (`<id>.bundle`) are built in. It shares the LingoHub
+    /// folder with the releases, so merged bundles are excluded from backups like them
+    /// and discarded along with them.
     var mergedBundlesFolderUrl: URL? {
         return updateBundleFolderUrl?.appendingPathComponent(LingoHubConstants.mergedBundlesFolderName)
     }

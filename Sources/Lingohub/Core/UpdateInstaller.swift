@@ -97,11 +97,11 @@ actor UpdateInstaller {
     ///   - expectedSha256: Optional SHA-256 hex digest from the release metadata.
     ///     When present, the archive must match it before anything is extracted.
     ///   - mergedBundle: Builds the release's merged bundle from the validated staging
-    ///     directory, before the swap. The new release goes live with its merged bundle
-    ///     ready, so the caller activates both at once: lookups never read the new
-    ///     release through the previous snapshot while a merge runs, and a termination
-    ///     during the merge leaves the previous release live. A failed build is logged
-    ///     and does not fail the install.
+    ///     directory, before the move. The release goes live with its merged bundle
+    ///     ready, so the caller activates both at once: swizzled lookups and
+    ///     `Bundle.lingohub` switch to it together, and a termination during the merge
+    ///     leaves the previous release live. A failed build is logged and does not fail
+    ///     the install.
     @discardableResult
     func install(archiveURL: URL, liveBundleURL: URL, expectedSha256: String?, mergedBundle builder: MergedBundleBuilder? = nil) throws -> InstallResult {
         let fileManager = FileManager.default
