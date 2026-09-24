@@ -18,18 +18,19 @@ struct ContentView: View {
                 .imageScale(.large)
                 .foregroundStyle(.tint)
 
-            // Using NSLocalizedString which will be handled by LingoHub's swizzling
-            Text(NSLocalizedString("welcome_message", comment: "Welcome message shown on the main screen"))
+            // SwiftUI looks strings up without going through the swizzled
+            // NSLocalizedString path; `bundle: .lingohub` serves downloaded
+            // translations, falling back to the strings bundled with the app.
+            Text("welcome_message", bundle: .lingohub, comment: "Welcome message shown on the main screen")
                 .font(.title)
                 .multilineTextAlignment(.center)
 
-            Text(NSLocalizedString("app_description", comment: "Brief description of the app"))
+            // The same for LocalizedStringResource-based code
+            Text(lh: LocalizedStringResource("app_description", comment: "Brief description of the app"))
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            Button(currentLanguage == "en" ?
-                   NSLocalizedString("switch_to_german", comment: "Button to switch to German language") :
-                    NSLocalizedString("switch_to_english", comment: "Button to switch to English language")) {
+            Button {
                 // Toggle between English and German
                 let newLanguage = currentLanguage == "en" ? "de" : "en"
                 LingoHubSDK.shared.setLanguage(newLanguage)
@@ -37,16 +38,23 @@ struct ContentView: View {
 
                 // Force view refresh
                 refreshTrigger.toggle()
+            } label: {
+                if currentLanguage == "en" {
+                    Text("switch_to_german", bundle: .lingohub, comment: "Button to switch to German language")
+                } else {
+                    Text("switch_to_english", bundle: .lingohub, comment: "Button to switch to English language")
+                }
             }
-                    .padding()
-                    .background(Color.blue)
-                    .foregroundColor(.white)
-                    .cornerRadius(8)
+            .padding()
+            .background(Color.blue)
+            .foregroundColor(.white)
+            .cornerRadius(8)
 
             // Update button
-            Button(NSLocalizedString("check_for_updates", comment: "Button to check for content updates")) {
+            Button {
                 LingoHubSDK.shared.update()
-
+            } label: {
+                Text("check_for_updates", bundle: .lingohub, comment: "Button to check for content updates")
             }
             .padding()
             .background(Color.green)
