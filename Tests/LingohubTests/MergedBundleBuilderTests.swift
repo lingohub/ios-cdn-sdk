@@ -190,8 +190,10 @@ final class MergedBundleBuilderTests: XCTestCase {
 
         XCTAssertEqual(strings(merged, "de", table: "Settings"), ["title": "Title (en)", "other": "Anderes (Release)"])
         XCTAssertEqual(lookup("title", in: merged, language: "de", table: "Settings"), "Title (en)")
-        let resource = LocalizedStringResource("title", table: "Settings", locale: Locale(identifier: "de"), bundle: .atURL(merged.bundle.bundleURL))
-        XCTAssertEqual(String(localized: resource), "Title (en)")
+        if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) {
+            let resource = LocalizedStringResource("title", table: "Settings", locale: Locale(identifier: "de"), bundle: .atURL(merged.bundle.bundleURL))
+            XCTAssertEqual(String(localized: resource), "Title (en)")
+        }
     }
 
     func testLanguageFoldersAreSelfContained() throws {
