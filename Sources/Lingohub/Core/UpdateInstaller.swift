@@ -17,8 +17,8 @@ import ZIPFoundation
 /// never a mix. This holds because extraction happens in a staging directory next to
 /// the destination and the final activation is a single atomic filesystem move. The
 /// SDK installs every release to a fresh destination (see
-/// `LocalizationCacheManager.makeReleaseUrl`), so the previous release stays intact
-/// until it is deleted after the new one is active.
+/// `LocalizationCacheManager.makeReleaseUrl`), so the previous release stays intact;
+/// it is removed on the next launch.
 ///
 /// An actor so archive verification, extraction, and validation run off the main
 /// thread and concurrent installs are serialized.
@@ -250,10 +250,14 @@ actor UpdateInstaller {
 
     // MARK: - Removal
 
-    /// Deletes a release that is not (or no longer) active. Serialized with installs, off
-    /// the main thread.
+    /// Deletes a release that was never activated. Best effort: a failure is logged,
+    /// and the next launch removes the unreferenced folder.
     func removeRelease(at releaseURL: URL) {
-        LingoHubLogger.shared.log("Installer: removing release \(releaseURL.lastPathComponent)")
-        try? FileManager.default.removeItem(at: releaseURL)
+        do {
+            try FileManager.default.removeItem(at: releaseURL)
+            LingoHubLogger.shared.log("Installer: removed release \(releaseURL.lastPathComponent)")
+        } catch {
+            LingoHubLogger.shared.log("Installer: could not remove release \(releaseURL.lastPathComponent): \(error)")
+        }
     }
 }

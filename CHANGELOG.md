@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
-- After a second release was installed in the same app session, `NSLocalizedString` kept serving the first release's `.stringsdict` plurals, and missed string tables only the new release had, until the app was relaunched. Keys of `.strings` tables both releases had were unaffected. Foundation caches bundles and the string tables it loaded from them by path, and every release was installed at the same path. Each release is now installed into a folder of its own (`Application Support/Lingohub/releases/`), and the replaced release is deleted once the new one is active. A release installed by an earlier SDK version keeps working and moves to the new layout with the next update.
+- After a second release was installed in the same app session, `NSLocalizedString` kept serving the first release's `.stringsdict` plurals, and missed string tables only the new release had, until the app was relaunched. Keys of `.strings` tables both releases had were unaffected. Foundation caches bundles and the string tables it loaded from them by path, and every release was installed at the same path. Each release is now installed into a folder of its own (`Application Support/Lingohub/releases/`). The replaced release is kept until the next launch, so lookups that already resolved it still complete, and it remains the fallback should the new release's metadata not reach disk. A release installed by an earlier SDK version keeps working and moves to the new layout with the next update.
 
 ## [2.0.0] - 2026-09-02
 

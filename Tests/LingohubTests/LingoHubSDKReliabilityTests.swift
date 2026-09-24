@@ -193,8 +193,17 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
         let secondURL = try XCTUnwrap(sut.cacheManager.currentSnapshot?.bundleURL)
 
         XCTAssertNotEqual(firstURL.path, secondURL.path)
-        XCTAssertEqual(try installedReleaseNames(), [secondURL.lastPathComponent], "The replaced release is deleted")
         XCTAssertEqual(UserDefaults.standard.string(forKey: LingoHubConstants.releaseDirectory), secondURL.lastPathComponent)
+        XCTAssertEqual(try installedReleaseNames(), [firstURL.lastPathComponent, secondURL.lastPathComponent].sorted(), "The replaced release stays while this process runs")
+
+        // Configuring again in the same process keeps it too
+        sut.configureForTests()
+        XCTAssertEqual(try installedReleaseNames().count, 2)
+
+        // The next launch removes it
+        sut.cacheManager.forgetReleasesInUse()
+        sut.configureForTests()
+        XCTAssertEqual(try installedReleaseNames(), [secondURL.lastPathComponent])
     }
 
     func testReleaseInstalledByAnEarlierSDKSurvivesTheUpgrade() async throws {
@@ -212,9 +221,13 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
         XCTAssertEqual(sut.distributionVersion, "sdk-2.0-release")
         XCTAssertEqual(sut.localizedString(forKey: "StringPlain"), "From SDK 2.0")
 
-        // The next install moves on to the release folder
+        // The next install moves on to the release folder; the next launch removes the
+        // fixed location
         await sut.installUpdatedBundle()
+        XCTAssertEqual(sut.localizedString(forKey: "StringPlain"), "String")
 
+        sut.cacheManager.forgetReleasesInUse()
+        sut.configureForTests()
         XCTAssertEqual(sut.localizedString(forKey: "StringPlain"), "String")
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixed.path))
         XCTAssertEqual(try installedReleaseNames().count, 1)
@@ -235,6 +248,53 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
         XCTAssertEqual(sut.localizedString(forKey: "StringPlain"), "String")
         XCTAssertFalse(FileManager.default.fileExists(atPath: unpersisted.path))
         XCTAssertEqual(try installedReleaseNames().count, 1)
+    }
+
+    func testLookupThatResolvedTheReplacedReleaseStillCompletes() async throws {
+        // A lookup on another thread can resolve the release's language bundle, then
+        // lose the CPU while a new release is activated. Foundation loads tables lazily,
+        // so the replaced release must still be on disk when that lookup resumes.
+        sut.configureForTests()
+        sut.setLanguage("en")
+        let first = auxDir.appendingPathComponent("first.zip")
+        try TestArchives.localizationZip(strings: ["en": ["K": "first"]], to: first)
+        try await sut.installArchive(at: first, identifier: "first", appVersion: TestConstants.appVersion)
+        let resolvedBeforeTheSwap = try XCTUnwrap(sut.cacheManager.languageBundle(for: "en"))
+
+        let second = auxDir.appendingPathComponent("second.zip")
+        try TestArchives.localizationZip(strings: ["en": ["K": "second"]], to: second)
+        try await sut.installArchive(at: second, identifier: "second", appVersion: TestConstants.appVersion)
+
+        XCTAssertEqual(resolvedBeforeTheSwap.localizedString(forKey: "K", value: "FALLBACK", table: nil), "first")
+        XCTAssertEqual(sut.localizedString(forKey: "K", tableName: nil), "second")
+    }
+
+    func testRelaunchWithTheLastDurableRecordOfTheReplacedRelease() async throws {
+        // UserDefaults reaches disk asynchronously. If the device stops before the new
+        // release's record is durable, the next launch reads the previous record: that
+        // release must still exist, and the unreferenced newer one is removed.
+        sut.configureForTests()
+        sut.setLanguage("en")
+        let first = auxDir.appendingPathComponent("first.zip")
+        try TestArchives.localizationZip(strings: ["en": ["K": "first"]], to: first)
+        try await sut.installArchive(at: first, identifier: "first", appVersion: TestConstants.appVersion)
+        let durableRecord = [LingoHubConstants.distributionVersion, LingoHubConstants.appVersion, LingoHubConstants.releaseDirectory]
+            .map { ($0, UserDefaults.standard.string(forKey: $0)) }
+
+        let second = auxDir.appendingPathComponent("second.zip")
+        try TestArchives.localizationZip(strings: ["en": ["K": "second"]], to: second)
+        try await sut.installArchive(at: second, identifier: "second", appVersion: TestConstants.appVersion)
+
+        // Next process: the second release's record never reached disk
+        for (key, value) in durableRecord {
+            UserDefaults.standard.set(value, forKey: key)
+        }
+        sut.cacheManager.forgetReleasesInUse()
+        sut.configureForTests()
+
+        XCTAssertEqual(sut.distributionVersion, "first")
+        XCTAssertEqual(sut.localizedString(forKey: "K", tableName: nil), "first")
+        XCTAssertEqual(try installedReleaseNames().count, 1, "The unreferenced second release is removed")
     }
 
     func testPersistedFolderThatIsMissingOrInvalidIsHealed() async throws {

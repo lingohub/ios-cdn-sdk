@@ -41,6 +41,11 @@ final class LocalizationCacheManager: @unchecked Sendable {
     // Bumped on every cache clear so in-flight table loads from a previous
     // bundle can't be written back into the freshly cleared cache.
     private var cacheGeneration: UInt64 = 0
+    // Paths of every release activated in this process. A lookup that resolved a
+    // release's bundle before the next release was activated still reads from it
+    // (Foundation loads tables lazily), so none of these is deleted while the process
+    // runs; the next launch removes those no metadata refers to.
+    private var releasesInUse: Set<String> = []
     private var _language: String?
     private var _swizzledBundlePaths: [String] = []
     // Storage roots can be overridden (by tests) so nothing ever touches the real
@@ -125,6 +130,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
             localizationCache.removeAll()
             languageBundleCache.removeAll()
             cacheGeneration &+= 1
+            releasesInUse.insert(bundleURL.path)
         }
         LingoHubLogger.shared.log("Cache Manager: activated release \(distributionVersion)")
         return true
@@ -181,6 +187,11 @@ final class LocalizationCacheManager: @unchecked Sendable {
         defaults.set(appVersion, forKey: LingoHubConstants.appVersion)
     }
 
+    /// Forgets which releases this process activated, as a new process would. Test hook.
+    func forgetReleasesInUse() {
+        lock.lh_withLock { releasesInUse.removeAll() }
+    }
+
     /// Removes the persisted release metadata.
     func clearPersistedRelease() {
         let defaults = UserDefaults.standard
@@ -203,9 +214,9 @@ final class LocalizationCacheManager: @unchecked Sendable {
         return releasesFolderUrl?.appendingPathComponent(name, isDirectory: true)
     }
 
-    /// Deletes installed releases other than `kept`, and leftovers of interrupted
-    /// installs, from both the release folder and the fixed location earlier SDK
-    /// versions used.
+    /// Deletes installed releases other than `kept` and those this process activated
+    /// (see `releasesInUse`), plus leftovers of interrupted installs, from both the
+    /// release folder and the fixed location earlier SDK versions used.
     private func removeReleases(keeping kept: URL?) {
         let fileManager = FileManager.default
         var installed: [URL] = []
@@ -215,9 +226,17 @@ final class LocalizationCacheManager: @unchecked Sendable {
         if let folderURL = releasesFolderUrl, let names = try? fileManager.contentsOfDirectory(atPath: folderURL.path) {
             installed += names.map { folderURL.appendingPathComponent($0, isDirectory: true) }
         }
-        for url in installed where url.path != kept?.path {
-            LingoHubLogger.shared.log("Cache Manager: removing unreferenced release \(url.lastPathComponent)")
-            try? fileManager.removeItem(at: url)
+        var retained = lock.lh_withLock { releasesInUse }
+        if let kept {
+            retained.insert(kept.path)
+        }
+        for url in installed where !retained.contains(url.path) {
+            do {
+                try fileManager.removeItem(at: url)
+                LingoHubLogger.shared.log("Cache Manager: removed unreferenced release \(url.lastPathComponent)")
+            } catch {
+                LingoHubLogger.shared.log("Cache Manager: could not remove unreferenced release \(url.lastPathComponent): \(error)")
+            }
         }
     }
 
@@ -403,18 +422,9 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     /// Where earlier SDK versions installed every release, reusing the path
     /// (`Lingohub/update.bundle`). Still read while no release folder is persisted, so
-    /// those installs survive the upgrade; the next install replaces it.
+    /// those installs survive the upgrade; the next install supersedes it.
     var fixedUpdateBundleUrl: URL? {
         return updateBundleFolderUrl?.appendingPathComponent(LocalizationCacheManager.fixedUpdateBundleName, isDirectory: true)
-    }
-
-    /// Whether `url` is a location releases are installed to, and may be deleted once
-    /// another release replaced it.
-    func isInstalledReleaseUrl(_ url: URL) -> Bool {
-        if url.path == fixedUpdateBundleUrl?.path {
-            return true
-        }
-        return url.deletingLastPathComponent().path == releasesFolderUrl?.path
     }
 
     // MARK: - Storage housekeeping

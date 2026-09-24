@@ -359,7 +359,9 @@ extension LingoHubSDK {
     /// stage + validate + move into a folder of its own (off the main actor), then —
     /// back on the main actor — activate the new snapshot, persist the release metadata,
     /// and notify observers. Observers of `LingoHubDidUpdateLocalization` always see the
-    /// new release. The replaced release is deleted last.
+    /// new release. The replaced release stays on disk until the next launch: lookups
+    /// that resolved it before the swap still read from it, and it remains the fallback
+    /// should the new release's metadata not reach disk.
     func installArchive(at archiveURL: URL, identifier: String, appVersion: String, expectedSha256: String? = nil) async throws {
         // Every release gets a path of its own (see `makeReleaseUrl`)
         guard let releaseURL = cacheManager.makeReleaseUrl(),
@@ -379,7 +381,6 @@ extension LingoHubSDK {
         // Downloaded translations are re-downloadable, keep them out of device backups
         cacheManager.excludeFromBackup(folderURL)
 
-        let replacedReleaseURL = cacheManager.currentSnapshot?.bundleURL
         guard cacheManager.activate(bundleURL: releaseURL, distributionVersion: identifier, appVersion: appVersion) else {
             await installer.removeRelease(at: releaseURL)
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Installed bundle could not be opened", errorCodes: [])
@@ -391,12 +392,6 @@ extension LingoHubSDK {
         // localized strings synchronously get content from the new release.
         NotificationCenter.default.post(name: .LingoHubDidUpdateLocalization, object: nil)
         LingoHubLogger.shared.log("Bundle successfully updated to release \(identifier)")
-
-        // Nothing refers to the replaced release anymore. (If the app terminates before
-        // this, the next configure removes it.)
-        if let replacedReleaseURL, cacheManager.isInstalledReleaseUrl(replacedReleaseURL) {
-            await installer.removeRelease(at: replacedReleaseURL)
-        }
     }
 }
 
