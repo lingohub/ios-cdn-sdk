@@ -400,8 +400,8 @@ extension LingoHubSDK {
     }
 
     /// Installs a downloaded release archive and publishes it:
-    /// stage + validate + move into a folder of its own, build the merged bundle (both
-    /// off the main actor), then — back on the main actor — activate the new snapshot,
+    /// stage + validate + build the merged bundle + move into a folder of its own (off
+    /// the main actor), then — back on the main actor — activate the new snapshot,
     /// persist the release metadata, and notify observers. Observers of
     /// `LingoHubDidUpdateLocalization` always see the new release, through swizzled
     /// lookups and `Bundle.lingohub` alike. The replaced release stays on disk until the
@@ -419,19 +419,26 @@ extension LingoHubSDK {
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Could not determine storage location", errorCodes: [])
         }
 
+        let replacedMergedBundle = cacheManager.currentSnapshot?.mergedBundle
+        let installed: UpdateInstaller.InstallResult
         do {
             try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-            _ = try await installer.install(archiveURL: archiveURL, liveBundleURL: releaseURL, expectedSha256: expectedSha256)
+            // The merged bundle is built from the staged release, before the move, so
+            // the release and its merged bundle go live together right below.
+            installed = try await installer.install(
+                archiveURL: archiveURL,
+                liveBundleURL: releaseURL,
+                expectedSha256: expectedSha256,
+                mergedBundle: mergedBundleBuilder(distributionVersion: identifier)
+            )
         } catch {
             LingoHubLogger.shared.log("Error installing bundle: \(error)")
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Failed to install bundle: \(error.localizedDescription)", errorCodes: [])
         }
+        let mergedBundle = installed.mergedBundle
 
         // Downloaded translations are re-downloadable, keep them out of device backups
         cacheManager.excludeFromBackup(folderURL)
-
-        let replacedMergedBundle = cacheManager.currentSnapshot?.mergedBundle
-        let mergedBundle = await buildMergedBundle(releaseURL: releaseURL, distributionVersion: identifier)
 
         guard cacheManager.activate(bundleURL: releaseURL, distributionVersion: identifier, appVersion: appVersion, mergedBundle: mergedBundle) else {
             await installer.removeRelease(at: releaseURL)
@@ -494,9 +501,15 @@ extension LingoHubSDK {
             return
         }
 
+        guard let builder = mergedBundleBuilder(distributionVersion: distributionVersion) else { return }
         enqueueMergedBundleWork { [installer, cacheManager] in
             await installer.removeMergedBundles(in: folderURL, keeping: [])
-            guard let mergedBundle = await self.buildMergedBundle(releaseURL: releaseURL, distributionVersion: distributionVersion) else {
+            let mergedBundle: MergedBundle
+            do {
+                mergedBundle = try await installer.buildMergedBundle(builder, from: releaseURL)
+            } catch {
+                // `Bundle.lingohub` keeps serving `Bundle.main`; swizzled lookups are unaffected
+                LingoHubLogger.shared.log("Merged bundle: could not build it for release \(distributionVersion): \(error)")
                 return
             }
             guard cacheManager.attachMergedBundle(mergedBundle, toSnapshot: snapshotID) else {
@@ -510,18 +523,14 @@ extension LingoHubSDK {
         }
     }
 
-    /// Builds the merged bundle for the release at `releaseURL`, off the main actor. nil
-    /// (logged) when it cannot be built: `Bundle.lingohub` then serves `Bundle.main`,
-    /// and swizzled lookups are unaffected.
-    private func buildMergedBundle(releaseURL: URL, distributionVersion: String) async -> MergedBundle? {
+    /// Builds merged bundles for `distributionVersion` from the app bundle's tables.
+    private func mergedBundleBuilder(distributionVersion: String) -> MergedBundleBuilder? {
         guard let folderURL = cacheManager.mergedBundlesFolderUrl else { return nil }
-        let builder = MergedBundleBuilder(source: MergedBundleSource(bundle: cacheManager.baseBundle), releaseURL: releaseURL)
-        do {
-            return try await installer.buildMergedBundle(builder, distributionVersion: distributionVersion, in: folderURL)
-        } catch {
-            LingoHubLogger.shared.log("Merged bundle: could not build it for release \(distributionVersion): \(error)")
-            return nil
-        }
+        return MergedBundleBuilder(
+            source: MergedBundleSource(bundle: cacheManager.baseBundle),
+            distributionVersion: distributionVersion,
+            folder: folderURL
+        )
     }
 
     private func enqueueMergedBundleWork(_ work: @escaping @MainActor @Sendable () async -> Void) {

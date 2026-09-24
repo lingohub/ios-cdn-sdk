@@ -79,7 +79,8 @@ final class UpdateInstallerTests: XCTestCase {
 
         let installed = try await installer.install(archiveURL: archive, liveBundleURL: liveBundleURL, expectedSha256: nil)
 
-        XCTAssertEqual(installed, liveBundleURL)
+        XCTAssertEqual(installed.liveBundleURL, liveBundleURL)
+        XCTAssertNil(installed.mergedBundle, "No merged bundle unless one is requested")
         XCTAssertEqual(liveValue(), "first")
         XCTAssertFalse(try stagingLeftoverExists())
     }
@@ -264,6 +265,63 @@ final class UpdateInstallerTests: XCTestCase {
         guard case .uncompressedSizeTooLarge = error else {
             return XCTFail("Expected uncompressedSizeTooLarge, got \(String(describing: error))")
         }
+    }
+
+    // MARK: - Merged bundle
+
+    private var mergedFolderURL: URL {
+        return liveBundleURL.deletingLastPathComponent().appendingPathComponent("merged")
+    }
+
+    private func mergedBundleBuilder(appStrings: [String: String]) throws -> MergedBundleBuilder {
+        let app = try TestArchives.appBundle(at: workDir.appendingPathComponent("App-\(UUID().uuidString).app"), strings: ["en": ["Localizable": appStrings]])
+        return MergedBundleBuilder(source: MergedBundleSource(bundle: app), distributionVersion: "release-2", folder: mergedFolderURL)
+    }
+
+    func testInstallBuildsTheMergedBundleFromTheRelease() async throws {
+        // Built from the validated staging directory before the swap, so the caller can
+        // activate the release and its merged bundle at once.
+        let installer = UpdateInstaller()
+        _ = try await installer.install(archiveURL: makeLocalizationArchive(value: "first"), liveBundleURL: liveBundleURL, expectedSha256: nil)
+        let builder = try mergedBundleBuilder(appStrings: ["K": "app value", "only_app": "only in the app"])
+
+        let installed = try await installer.install(archiveURL: makeLocalizationArchive(value: "second"), liveBundleURL: liveBundleURL, expectedSha256: nil, mergedBundle: builder)
+
+        let merged = try XCTUnwrap(installed.mergedBundle)
+        let english = merged.bundle(forLanguage: "en")
+        XCTAssertEqual(english.localizedString(forKey: "K", value: nil, table: nil), "second")
+        XCTAssertEqual(english.localizedString(forKey: "only_app", value: nil, table: nil), "only in the app")
+        XCTAssertEqual(merged.manifest.distributionVersion, "release-2")
+        XCTAssertEqual(liveValue(), "second")
+        XCTAssertFalse(try stagingLeftoverExists())
+    }
+
+    func testInstallSucceedsWhenTheMergedBundleCannotBeBuilt() async throws {
+        let installer = UpdateInstaller()
+        let builder = try mergedBundleBuilder(appStrings: ["K": "app value"])
+        let appTable = try XCTUnwrap(builder.source.resourcesURL).appendingPathComponent("en.lproj/Localizable.strings")
+        try Data("{{{{ not a strings file".utf8).write(to: appTable)
+
+        let installed = try await installer.install(archiveURL: makeLocalizationArchive(value: "first"), liveBundleURL: liveBundleURL, expectedSha256: nil, mergedBundle: builder)
+
+        XCTAssertNil(installed.mergedBundle)
+        XCTAssertEqual(liveValue(), "first", "The release installs without its merged bundle")
+    }
+
+    func testRejectedArchiveBuildsNoMergedBundle() async throws {
+        let installer = UpdateInstaller()
+        _ = try await installer.install(archiveURL: makeLocalizationArchive(value: "good"), liveBundleURL: liveBundleURL, expectedSha256: nil)
+        let builder = try mergedBundleBuilder(appStrings: ["K": "app value"])
+        let malformed = try makeArchive(files: ["en.lproj/Localizable.strings": Data("{{{{ not a strings file".utf8)])
+
+        do {
+            _ = try await installer.install(archiveURL: malformed, liveBundleURL: liveBundleURL, expectedSha256: nil, mergedBundle: builder)
+            XCTFail("Expected the install to fail")
+        } catch is UpdateInstaller.InstallError {}
+
+        XCTAssertEqual(liveValue(), "good")
+        let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: mergedFolderURL.path)) ?? []
+        XCTAssertEqual(leftovers, [], "A rejected release must not leave a merged bundle behind")
     }
 
     // MARK: - Checksum

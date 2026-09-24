@@ -45,7 +45,7 @@ final class MergedBundleBuilderTests: XCTestCase {
     }
 
     private func build(_ source: MergedBundleSource, release: String = "release-1") throws -> MergedBundle {
-        return try MergedBundleBuilder(source: source, releaseURL: releaseURL).build(distributionVersion: release, in: folderURL)
+        return try MergedBundleBuilder(source: source, distributionVersion: release, folder: folderURL).build(from: releaseURL)
     }
 
     private func strings(_ merged: MergedBundle, _ language: String, table: String = "Localizable") -> [String: String]? {

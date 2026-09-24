@@ -82,11 +82,15 @@ struct MergedBundleBuilder: Sendable {
     }
 
     let source: MergedBundleSource
-    /// The installed release (`update.bundle`).
-    let releaseURL: URL
+    /// The release the merged bundle is built for (`distributionReleaseId`).
+    let distributionVersion: String
+    /// The folder merged bundles are built in.
+    let folder: URL
 
-    /// Builds the merged bundle into `folder` and returns it opened.
-    func build(distributionVersion: String, in folder: URL) throws -> MergedBundle {
+    /// Builds the merged bundle from the release files at `releaseURL` (a validated
+    /// staging directory during an install, `update.bundle` at launch) and returns it
+    /// opened.
+    func build(from releaseURL: URL) throws -> MergedBundle {
         let fileManager = FileManager.default
         // `folder` lives next to the release. When the release was discarded while this
         // build waited, stop instead of recreating the storage folder.
@@ -101,7 +105,7 @@ struct MergedBundleBuilder: Sendable {
 
         try fileManager.createDirectory(at: stagingURL, withIntermediateDirectories: true)
         do {
-            try writeTables(into: stagingURL)
+            try writeTables(from: releaseURL, into: stagingURL)
             let info = manifest.infoPlist(identifier: "com.lingohub.sdk.merged.\(name)", developmentRegion: source.developmentRegion)
             try writePropertyList(info, to: stagingURL.appendingPathComponent("Info.plist"))
             try fileManager.moveItem(at: stagingURL, to: bundleURL)
@@ -118,7 +122,7 @@ struct MergedBundleBuilder: Sendable {
         return merged
     }
 
-    private func writeTables(into bundleURL: URL) throws {
+    private func writeTables(from releaseURL: URL, into bundleURL: URL) throws {
         let app = StringTableIndex(directory: source.resourcesURL)
         let release = StringTableIndex(directory: releaseURL)
         let developmentTables = app.languages[source.developmentRegion] ?? app.languages["Base"] ?? [:]

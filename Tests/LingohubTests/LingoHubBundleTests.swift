@@ -374,7 +374,8 @@ final class LingoHubBundleTests: XCTestCase {
         for value in ["A", "B"] {
             let releaseURL = auxDir.appendingPathComponent("release\(value)")
             try TestArchives.write(files: TestArchives.releaseFiles(strings: ["en": ["Localizable": ["welcome": value]]]), to: releaseURL)
-            let merged = try MergedBundleBuilder(source: source, releaseURL: releaseURL).build(distributionVersion: value, in: auxDir.appendingPathComponent("merged"))
+            let builder = MergedBundleBuilder(source: source, distributionVersion: value, folder: auxDir.appendingPathComponent("merged"))
+            let merged = try builder.build(from: releaseURL)
             releases.append((releaseURL, merged))
         }
         store.language = "en"
