@@ -7,6 +7,7 @@
 
 import CryptoKit
 import Foundation
+import XCTest
 import ZIPFoundation
 
 enum TestArchives {
@@ -47,6 +48,78 @@ enum TestArchives {
             try fileManager.createDirectory(at: lproj, withIntermediateDirectories: true)
             try stringsFile(table).write(to: lproj.appendingPathComponent("Localizable.strings"))
         }
+    }
+
+    /// A release laid out as the CDN ships it: `<language>.lproj/<table>.strings` as
+    /// text and `<language>.lproj/<table>.stringsdict` as XML plists
+    /// (`language` → `table` → `key` → value).
+    static func releaseFiles(strings: [String: [String: [String: String]]], stringsdicts: [String: [String: [String: Any]]] = [:]) throws -> [String: Data] {
+        var files: [String: Data] = [:]
+        for (language, tables) in strings {
+            for (table, entries) in tables {
+                files["\(language).lproj/\(table).strings"] = stringsFile(entries)
+            }
+        }
+        for (language, tables) in stringsdicts {
+            for (table, entries) in tables {
+                files["\(language).lproj/\(table).stringsdict"] = try PropertyListSerialization.data(fromPropertyList: entries, format: .xml, options: 0)
+            }
+        }
+        return files
+    }
+
+    /// Writes `files` (`relative path` → contents) below `url`.
+    static func write(files: [String: Data], to url: URL) throws {
+        for (path, data) in files {
+            let fileURL = url.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try data.write(to: fileURL)
+        }
+    }
+
+    /// A bundle laid out like a built app: Info.plist plus `<language>.lproj` string
+    /// tables compiled to binary plists, as Xcode ships them. Stands in for
+    /// `Bundle.main` as the base of merged bundles.
+    static func appBundle(
+        at url: URL,
+        developmentRegion: String = "en",
+        strings: [String: [String: [String: String]]],
+        stringsdicts: [String: [String: [String: Any]]] = [:]
+    ) throws -> Bundle {
+        var files: [String: Data] = [:]
+        for (language, tables) in strings {
+            for (table, entries) in tables {
+                files["\(language).lproj/\(table).strings"] = try PropertyListSerialization.data(fromPropertyList: entries, format: .binary, options: 0)
+            }
+        }
+        for (language, tables) in stringsdicts {
+            for (table, entries) in tables {
+                files["\(language).lproj/\(table).stringsdict"] = try PropertyListSerialization.data(fromPropertyList: entries, format: .binary, options: 0)
+            }
+        }
+        let info: [String: Any] = [
+            "CFBundleDevelopmentRegion": developmentRegion,
+            "CFBundleIdentifier": "com.lingohub.tests.app",
+            "CFBundlePackageType": "APPL",
+            "CFBundleShortVersionString": "1.0.0",
+            "CFBundleVersion": "1",
+        ]
+        files["Info.plist"] = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+        try write(files: files, to: url)
+        return try XCTUnwrap(Bundle(url: url))
+    }
+
+    /// A `.stringsdict` plural entry with `one` and `other` forms.
+    static func plural(one: String, other: String, valueType: String = "lld") -> [String: Any] {
+        return [
+            "NSStringLocalizedFormatKey": "%#@count@",
+            "count": [
+                "NSStringFormatSpecTypeKey": "NSStringPluralRuleType",
+                "NSStringFormatValueTypeKey": valueType,
+                "one": one,
+                "other": other,
+            ] as [String: Any],
+        ]
     }
 
     private static func stringsFile(_ table: [String: String]) -> Data {

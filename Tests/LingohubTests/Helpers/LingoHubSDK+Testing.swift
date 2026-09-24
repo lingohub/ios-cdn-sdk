@@ -29,6 +29,17 @@ public extension LingoHubSDK {
         }
     }
 
+    /// Waits until background merged-bundle work (launch-time builds, pruning) is done,
+    /// including work enqueued while waiting.
+    func waitForMergedBundleWork() async {
+        while let work = pendingMergedBundleWork {
+            await work.value
+            if pendingMergedBundleWork == work {
+                return
+            }
+        }
+    }
+
     func reset() {
         apiKey = nil
         appVersion = nil

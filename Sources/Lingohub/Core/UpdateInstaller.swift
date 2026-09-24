@@ -21,7 +21,8 @@ import ZIPFoundation
 /// it is removed on the next launch.
 ///
 /// An actor so archive verification, extraction, and validation run off the main
-/// thread and concurrent installs are serialized.
+/// thread, and installs and merged-bundle builds (which read the installed release)
+/// are serialized.
 actor UpdateInstaller {
 
     /// Resource limits applied to a release archive before extraction. Translation
@@ -181,19 +182,6 @@ actor UpdateInstaller {
 
     // MARK: - Validation
 
-    /// Archive junk that must not influence layout decisions or validation
-    /// (macOS resource forks, AppleDouble files, Finder metadata).
-    private func isJunk(_ url: URL) -> Bool {
-        let name = url.lastPathComponent
-        return name == "__MACOSX" || name == ".DS_Store" || name.hasPrefix("._")
-    }
-
-    private func isDirectory(_ url: URL) -> Bool {
-        var isDirectory: ObjCBool = false
-        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
-        return isDirectory.boolValue
-    }
-
     /// A release is usable when the staging root contains at least one `<lang>.lproj`
     /// directory holding at least one valid `.strings`/`.stringsdict` file — the exact
     /// layout runtime lookup resolves (`Bundle.path(forResource:ofType:)` finds `.lproj`
@@ -209,9 +197,9 @@ actor UpdateInstaller {
         let rootEntries = (try? fileManager.contentsOfDirectory(at: stagingURL, includingPropertiesForKeys: nil)) ?? []
 
         var localizationFileCount = 0
-        for lprojURL in rootEntries where lprojURL.lastPathComponent.hasSuffix(".lproj") && isDirectory(lprojURL) {
+        for lprojURL in rootEntries where lprojURL.lastPathComponent.hasSuffix(".lproj") && lprojURL.lh_isDirectory {
             let files = (try? fileManager.contentsOfDirectory(at: lprojURL, includingPropertiesForKeys: nil)) ?? []
-            for fileURL in files where !isJunk(fileURL) {
+            for fileURL in files where !fileURL.lh_isMacOSMetadata {
                 let name = fileURL.lastPathComponent
                 switch fileURL.pathExtension {
                 case "strings":
@@ -259,5 +247,19 @@ actor UpdateInstaller {
         } catch {
             LingoHubLogger.shared.log("Installer: could not remove release \(releaseURL.lastPathComponent): \(error)")
         }
+    }
+
+    // MARK: - Merged bundles
+
+    /// Builds the merged bundle for the installed release (see `MergedBundleBuilder`).
+    /// Runs here so it is serialized with installs: a build never reads a release that
+    /// is being replaced.
+    func buildMergedBundle(_ builder: MergedBundleBuilder, distributionVersion: String, in folder: URL) throws -> MergedBundle {
+        return try builder.build(distributionVersion: distributionVersion, in: folder)
+    }
+
+    /// Removes everything in `folder` except the merged bundles at `kept`.
+    func removeMergedBundles(in folder: URL, keeping kept: [URL]) {
+        MergedBundle.removeAll(in: folder, keeping: kept)
     }
 }
