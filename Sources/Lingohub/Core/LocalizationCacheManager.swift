@@ -41,6 +41,11 @@ final class LocalizationCacheManager: @unchecked Sendable {
     // Bumped on every cache clear so in-flight table loads from a previous
     // bundle can't be written back into the freshly cleared cache.
     private var cacheGeneration: UInt64 = 0
+    // Paths of every release activated in this process. A lookup that resolved a
+    // release's bundle before the next release was activated still reads from it
+    // (Foundation loads tables lazily), so none of these is deleted while the process
+    // runs; the next launch removes those no metadata refers to.
+    private var releasesInUse: Set<String> = []
     private var _language: String?
     private var _swizzledBundlePaths: [String] = []
     // Storage roots can be overridden (by tests) so nothing ever touches the real
@@ -125,6 +130,7 @@ final class LocalizationCacheManager: @unchecked Sendable {
             localizationCache.removeAll()
             languageBundleCache.removeAll()
             cacheGeneration &+= 1
+            releasesInUse.insert(bundleURL.path)
         }
         LingoHubLogger.shared.log("Cache Manager: activated release \(distributionVersion)")
         return true
@@ -141,32 +147,96 @@ final class LocalizationCacheManager: @unchecked Sendable {
         }
     }
 
-    /// Rebuilds the snapshot from persisted metadata and the bundle on disk, healing
+    /// Rebuilds the snapshot from persisted metadata and the release on disk, healing
     /// any partial state a crash may have left behind:
-    /// - metadata without a usable bundle → metadata is cleared, no update active
-    /// - a bundle without metadata → the unreferenced bundle is deleted
+    /// - metadata without a usable release → metadata is cleared, no update active
+    /// - releases the metadata does not refer to (installed, but the app terminated
+    ///   before the metadata was persisted) and install leftovers → deleted
     func restoreFromDisk() {
         let defaults = UserDefaults.standard
         let distributionVersion = defaults.string(forKey: LingoHubConstants.distributionVersion)
         let appVersion = defaults.string(forKey: LingoHubConstants.appVersion)
 
         guard let distributionVersion, let appVersion else {
-            if let bundleURL = updateBundleUrl, FileManager.default.fileExists(atPath: bundleURL.path) {
-                LingoHubLogger.shared.log("Cache Manager: removing unreferenced update bundle")
-                try? FileManager.default.removeItem(at: bundleURL)
-            }
+            removeReleases(keeping: nil)
             deactivate()
             return
         }
 
-        guard let bundleURL = updateBundleUrl,
-              bundleLooksUsable(at: bundleURL),
-              activate(bundleURL: bundleURL, distributionVersion: distributionVersion, appVersion: appVersion) else {
+        guard let releaseURL = persistedReleaseUrl,
+              bundleLooksUsable(at: releaseURL),
+              activate(bundleURL: releaseURL, distributionVersion: distributionVersion, appVersion: appVersion) else {
             LingoHubLogger.shared.log("Cache Manager: persisted release \(distributionVersion) is missing or unusable, clearing state")
-            defaults.removeObject(forKey: LingoHubConstants.distributionVersion)
-            defaults.removeObject(forKey: LingoHubConstants.appVersion)
+            clearPersistedRelease()
+            removeReleases(keeping: nil)
             deactivate()
             return
+        }
+        removeReleases(keeping: releaseURL)
+    }
+
+    /// Records `releaseURL` as the active release. The folder is written before the
+    /// release metadata: a termination in between pairs the new release with the
+    /// previous release ID, which the next update check corrects by downloading the
+    /// release again. The reverse order would leave the previous content under the new
+    /// ID, which no update check corrects.
+    func persistRelease(at releaseURL: URL, distributionVersion: String, appVersion: String) {
+        let defaults = UserDefaults.standard
+        defaults.set(releaseURL.lastPathComponent, forKey: LingoHubConstants.releaseDirectory)
+        defaults.set(distributionVersion, forKey: LingoHubConstants.distributionVersion)
+        defaults.set(appVersion, forKey: LingoHubConstants.appVersion)
+    }
+
+    /// Forgets which releases this process activated, as a new process would. Test hook.
+    func forgetReleasesInUse() {
+        lock.lh_withLock { releasesInUse.removeAll() }
+    }
+
+    /// Removes the persisted release metadata.
+    func clearPersistedRelease() {
+        let defaults = UserDefaults.standard
+        defaults.removeObject(forKey: LingoHubConstants.distributionVersion)
+        defaults.removeObject(forKey: LingoHubConstants.appVersion)
+        defaults.removeObject(forKey: LingoHubConstants.releaseDirectory)
+    }
+
+    /// The release folder the persisted metadata refers to: the folder named by
+    /// `persistRelease`, or `fixedUpdateBundleUrl` for a release installed by an earlier
+    /// SDK version (no folder name persisted). nil when the persisted name is not a plain
+    /// folder name, which the SDK never writes.
+    var persistedReleaseUrl: URL? {
+        guard let name = UserDefaults.standard.string(forKey: LingoHubConstants.releaseDirectory) else {
+            return fixedUpdateBundleUrl
+        }
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/") else {
+            return nil
+        }
+        return releasesFolderUrl?.appendingPathComponent(name, isDirectory: true)
+    }
+
+    /// Deletes installed releases other than `kept` and those this process activated
+    /// (see `releasesInUse`), plus leftovers of interrupted installs, from both the
+    /// release folder and the fixed location earlier SDK versions used.
+    private func removeReleases(keeping kept: URL?) {
+        let fileManager = FileManager.default
+        var installed: [URL] = []
+        if let fixedURL = fixedUpdateBundleUrl, fileManager.fileExists(atPath: fixedURL.path) {
+            installed.append(fixedURL)
+        }
+        if let folderURL = releasesFolderUrl, let names = try? fileManager.contentsOfDirectory(atPath: folderURL.path) {
+            installed += names.map { folderURL.appendingPathComponent($0, isDirectory: true) }
+        }
+        var retained = lock.lh_withLock { releasesInUse }
+        if let kept {
+            retained.insert(kept.path)
+        }
+        for url in installed where !retained.contains(url.path) {
+            do {
+                try fileManager.removeItem(at: url)
+                LingoHubLogger.shared.log("Cache Manager: removed unreferenced release \(url.lastPathComponent)")
+            } catch {
+                LingoHubLogger.shared.log("Cache Manager: could not remove unreferenced release \(url.lastPathComponent): \(error)")
+            }
         }
     }
 
@@ -310,14 +380,19 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     // MARK: - Update Bundle Access
 
-    private static let updateBundleName = "update.bundle"
+    private static let fixedUpdateBundleName = "update.bundle"
 
-    /// Checks if the update bundle directory exists on disk.
+    /// Whether an installed release exists on disk.
     var updateBundleExists: Bool {
-        guard let url = self.updateBundleUrl else {
+        let fileManager = FileManager.default
+        if let fixedURL = fixedUpdateBundleUrl, fileManager.fileExists(atPath: fixedURL.path) {
+            return true
+        }
+        guard let folderURL = releasesFolderUrl,
+              let names = try? fileManager.contentsOfDirectory(atPath: folderURL.path) else {
             return false
         }
-        return FileManager.default.fileExists(atPath: url.path)
+        return names.contains { $0.hasSuffix(".bundle") }
     }
 
     /// The full URL to the LingoHub folder in Application Support, or nil if it can't be determined.
@@ -332,9 +407,24 @@ final class LocalizationCacheManager: @unchecked Sendable {
         return root?.appendingPathComponent(LingoHubConstants.folderName)
     }
 
-    /// The full URL to the `update.bundle` directory within the LingoHub folder.
-    var updateBundleUrl: URL? {
-        return updateBundleFolderUrl?.appendingPathComponent(LocalizationCacheManager.updateBundleName)
+    /// The folder releases are installed into, each under a name of its own.
+    var releasesFolderUrl: URL? {
+        return updateBundleFolderUrl?.appendingPathComponent(LingoHubConstants.releasesFolderName, isDirectory: true)
+    }
+
+    /// A fresh location to install a release to. Foundation caches bundles, and the
+    /// string tables it loaded from them, by path: a release installed over the previous
+    /// one's path would keep being read through the previous release's cache (stale
+    /// `.stringsdict` plurals, missing new tables) until the next launch.
+    func makeReleaseUrl() -> URL? {
+        return releasesFolderUrl?.appendingPathComponent(UUID().uuidString + ".bundle", isDirectory: true)
+    }
+
+    /// Where earlier SDK versions installed every release, reusing the path
+    /// (`Lingohub/update.bundle`). Still read while no release folder is persisted, so
+    /// those installs survive the upgrade; the next install supersedes it.
+    var fixedUpdateBundleUrl: URL? {
+        return updateBundleFolderUrl?.appendingPathComponent(LocalizationCacheManager.fixedUpdateBundleName, isDirectory: true)
     }
 
     // MARK: - Storage housekeeping

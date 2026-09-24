@@ -15,6 +15,10 @@ struct LingoHubConstants {
     static let basePath = "https://cdn.lingohub.com/"
     static let distributionVersion = "LingohubDistributionVersion"
     static let appVersion = "LingohubAppVersion"
+    /// The folder (inside `releasesFolderName`) of the active release.
+    static let releaseDirectory = "LingohubReleaseDirectory"
+    /// Subfolder of `folderName` releases are installed into, each under a fresh name.
+    static let releasesFolderName = "releases"
     static let languageOverride = "LingohubLanguageOverride"
     static let usageCooldownUntil = "LingohubUsageCooldownUntil"
     /// How long update checks stay paused after the CDN reports an exhausted usage budget (429).
