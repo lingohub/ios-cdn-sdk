@@ -12,10 +12,13 @@ import ZIPFoundation
 /// in a partial state.
 ///
 /// Invariant: at every point in time — including mid-install, after a thrown error,
-/// or after a process crash — the live `update.bundle` directory is either the
-/// complete previous release or the complete new release, never a mix. This holds
-/// because extraction happens in a staging directory next to the live bundle and
-/// the final activation is a single atomic filesystem replace.
+/// or after a process crash — the destination directory is either absent (or the
+/// complete previous release, when replaced in place) or the complete new release,
+/// never a mix. This holds because extraction happens in a staging directory next to
+/// the destination and the final activation is a single atomic filesystem move. The
+/// SDK installs every release to a fresh destination (see
+/// `LocalizationCacheManager.makeReleaseUrl`), so the previous release stays intact
+/// until it is deleted after the new one is active.
 ///
 /// An actor so archive verification, extraction, and validation run off the main
 /// thread and concurrent installs are serialized.
@@ -78,9 +81,9 @@ actor UpdateInstaller {
     ///
     /// - Parameters:
     ///   - archiveURL: The downloaded ZIP archive.
-    ///   - liveBundleURL: The destination the live bundle lives at (`…/Lingohub/update.bundle`).
-    ///     Its parent directory is also used for the staging directory so the final
-    ///     swap is a same-volume atomic replace.
+    ///   - liveBundleURL: The destination the release is installed to
+    ///     (`…/Lingohub/releases/<id>.bundle`). Its parent directory is also used for the
+    ///     staging directory so the final move is a same-volume atomic rename.
     ///   - expectedSha256: Optional SHA-256 hex digest from the release metadata.
     ///     When present, the archive must match it before anything is extracted.
     /// - Returns: `liveBundleURL`, now containing the complete new release.
@@ -243,5 +246,14 @@ actor UpdateInstaller {
         } else {
             try fileManager.moveItem(at: stagingURL, to: liveBundleURL)
         }
+    }
+
+    // MARK: - Removal
+
+    /// Deletes a release that is not (or no longer) active. Serialized with installs, off
+    /// the main thread.
+    func removeRelease(at releaseURL: URL) {
+        LingoHubLogger.shared.log("Installer: removing release \(releaseURL.lastPathComponent)")
+        try? FileManager.default.removeItem(at: releaseURL)
     }
 }

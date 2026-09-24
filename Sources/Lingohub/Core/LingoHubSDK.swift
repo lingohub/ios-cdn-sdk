@@ -356,11 +356,13 @@ extension LingoHubSDK {
     }
 
     /// Installs a downloaded release archive and publishes it:
-    /// stage + validate + swap (off the main actor), then — back on the main actor —
-    /// activate the new snapshot, persist the release metadata, and notify observers.
-    /// Observers of `LingoHubDidUpdateLocalization` always see the new release.
+    /// stage + validate + move into a folder of its own (off the main actor), then —
+    /// back on the main actor — activate the new snapshot, persist the release metadata,
+    /// and notify observers. Observers of `LingoHubDidUpdateLocalization` always see the
+    /// new release. The replaced release is deleted last.
     func installArchive(at archiveURL: URL, identifier: String, appVersion: String, expectedSha256: String? = nil) async throws {
-        guard let liveBundleURL = cacheManager.updateBundleUrl,
+        // Every release gets a path of its own (see `makeReleaseUrl`)
+        guard let releaseURL = cacheManager.makeReleaseUrl(),
               let folderURL = cacheManager.updateBundleFolderUrl else {
             LingoHubLogger.shared.log("Could not determine update bundle destination URL.")
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Could not determine storage location", errorCodes: [])
@@ -368,7 +370,7 @@ extension LingoHubSDK {
 
         do {
             try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-            _ = try await installer.install(archiveURL: archiveURL, liveBundleURL: liveBundleURL, expectedSha256: expectedSha256)
+            _ = try await installer.install(archiveURL: archiveURL, liveBundleURL: releaseURL, expectedSha256: expectedSha256)
         } catch {
             LingoHubLogger.shared.log("Error installing bundle: \(error)")
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Failed to install bundle: \(error.localizedDescription)", errorCodes: [])
@@ -377,17 +379,24 @@ extension LingoHubSDK {
         // Downloaded translations are re-downloadable, keep them out of device backups
         cacheManager.excludeFromBackup(folderURL)
 
-        guard cacheManager.activate(bundleURL: liveBundleURL, distributionVersion: identifier, appVersion: appVersion) else {
+        let replacedReleaseURL = cacheManager.currentSnapshot?.bundleURL
+        guard cacheManager.activate(bundleURL: releaseURL, distributionVersion: identifier, appVersion: appVersion) else {
+            await installer.removeRelease(at: releaseURL)
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Installed bundle could not be opened", errorCodes: [])
         }
 
-        UserDefaults.standard.set(identifier, forKey: LingoHubConstants.distributionVersion)
-        UserDefaults.standard.set(appVersion, forKey: LingoHubConstants.appVersion)
+        cacheManager.persistRelease(at: releaseURL, distributionVersion: identifier, appVersion: appVersion)
 
         // The snapshot swap above already cleared all caches, so observers that read
         // localized strings synchronously get content from the new release.
         NotificationCenter.default.post(name: .LingoHubDidUpdateLocalization, object: nil)
         LingoHubLogger.shared.log("Bundle successfully updated to release \(identifier)")
+
+        // Nothing refers to the replaced release anymore. (If the app terminates before
+        // this, the next configure removes it.)
+        if let replacedReleaseURL, cacheManager.isInstalledReleaseUrl(replacedReleaseURL) {
+            await installer.removeRelease(at: replacedReleaseURL)
+        }
     }
 }
 
@@ -424,8 +433,7 @@ extension LingoHubSDK {
     }
 
     func cleanUp() {
-        UserDefaults.standard.removeObject(forKey: LingoHubConstants.distributionVersion)
-        UserDefaults.standard.removeObject(forKey: LingoHubConstants.appVersion)
+        cacheManager.clearPersistedRelease()
         UserDefaults.standard.removeObject(forKey: LingoHubConstants.usageCooldownUntil)
 
         cacheManager.deactivate()

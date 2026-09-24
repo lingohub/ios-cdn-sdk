@@ -77,6 +77,48 @@ final class PluralizationTests: XCTestCase {
         XCTAssertEqual(String.localizedStringWithFormat(pattern, 4), "4Freunde einladen")
     }
 
+    /// Regression (lingohub/organization#2354): Foundation caches bundles and their
+    /// string tables by path. When every release was installed at the same path, a
+    /// second release in the same process kept serving the first release's `.stringsdict`
+    /// plurals (and missed tables the first release did not have) until the next launch,
+    /// while `.strings` keys updated.
+    func testSecondReleaseInstalledInTheSameProcessServesItsPlurals() async throws {
+        sut.configureForTests()
+        sut.setLanguage("en")
+        sut.swizzleBundle(Bundle.module)
+
+        for release in ["first", "second"] {
+            var files: [String: Data] = [
+                "en.lproj/Localizable.strings": Data("\"plain\" = \"plain \(release)\";".utf8),
+                "en.lproj/Localizable.stringsdict": try pluralStringsdict(key: "things", one: "%lld thing \(release)", other: "%lld things \(release)"),
+            ]
+            if release == "second" {
+                files["en.lproj/Extra.strings"] = Data("\"extra\" = \"extra \(release)\";".utf8)
+            }
+            let archive = auxDir.appendingPathComponent("\(release).zip")
+            try TestArchives.zip(files: files, to: archive)
+            try await sut.installArchive(at: archive, identifier: "release-\(release)", appVersion: TestConstants.appVersion)
+
+            let pattern = NSLocalizedString("things", tableName: nil, bundle: Bundle.module, value: "", comment: "")
+            XCTAssertEqual(String(format: pattern, locale: Locale(identifier: "en"), 5), "5 things \(release)", "Plural after installing the \(release) release")
+            XCTAssertEqual(NSLocalizedString("plain", tableName: nil, bundle: Bundle.module, value: "", comment: ""), "plain \(release)")
+        }
+        XCTAssertEqual(NSLocalizedString("extra", tableName: "Extra", bundle: Bundle.module, value: "", comment: ""), "extra second", "A table only the second release has")
+    }
+
+    private func pluralStringsdict(key: String, one: String, other: String) throws -> Data {
+        let entry: [String: Any] = [
+            "NSStringLocalizedFormatKey": "%#@count@",
+            "count": [
+                "NSStringFormatSpecTypeKey": "NSStringPluralRuleType",
+                "NSStringFormatValueTypeKey": "lld",
+                "one": one,
+                "other": other,
+            ] as [String: Any],
+        ]
+        return try PropertyListSerialization.data(fromPropertyList: [key: entry], format: .xml, options: 0)
+    }
+
     /// The hard case: languages whose plural rules differ from the device language.
     /// Foundation selects the plural CATEGORY at *format* time from the formatting
     /// locale — `String.localizedStringWithFormat` uses `Locale.current`, which in a

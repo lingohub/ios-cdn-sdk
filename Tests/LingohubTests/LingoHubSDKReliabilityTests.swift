@@ -146,8 +146,12 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
     }
 
     func testUnreferencedBundleIsRemovedOnConfigure() async throws {
-        let live = try XCTUnwrap(sut.cacheManager.updateBundleUrl)
-        try TestArchives.releaseDirectory(strings: ["en": ["K": "orphan"]], at: live)
+        // Releases without metadata, at the location earlier SDK versions used and in
+        // the release folder, are removed
+        let fixed = try XCTUnwrap(sut.cacheManager.fixedUpdateBundleUrl)
+        try TestArchives.releaseDirectory(strings: ["en": ["K": "orphan"]], at: fixed)
+        let orphan = try XCTUnwrap(sut.cacheManager.makeReleaseUrl())
+        try TestArchives.releaseDirectory(strings: ["en": ["K": "orphan"]], at: orphan)
 
         sut.configureForTests()
 
@@ -167,6 +171,93 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
         XCTAssertTrue(sut.isUpdatedBundleUsed)
         XCTAssertEqual(sut.distributionVersion, TestConstants.bundleIdentifier)
         XCTAssertEqual(sut.localizedString(forKey: "StringPlain"), "String")
+    }
+
+    // MARK: - Release storage
+
+    /// The release folders currently on disk.
+    private func installedReleaseNames() throws -> [String] {
+        let folder = try XCTUnwrap(sut.cacheManager.releasesFolderUrl)
+        return ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).sorted()
+    }
+
+    func testEveryReleaseIsInstalledToAPathOfItsOwn() async throws {
+        // Foundation caches bundles and their tables by path (lingohub/organization#2354)
+        sut.configureForTests()
+        await sut.installUpdatedBundle()
+        let firstURL = try XCTUnwrap(sut.cacheManager.currentSnapshot?.bundleURL)
+
+        let second = auxDir.appendingPathComponent("second.zip")
+        try TestArchives.localizationZip(strings: ["en": ["StringPlain": "String v2"]], to: second)
+        try await sut.installArchive(at: second, identifier: "second-release", appVersion: TestConstants.appVersion)
+        let secondURL = try XCTUnwrap(sut.cacheManager.currentSnapshot?.bundleURL)
+
+        XCTAssertNotEqual(firstURL.path, secondURL.path)
+        XCTAssertEqual(try installedReleaseNames(), [secondURL.lastPathComponent], "The replaced release is deleted")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: LingoHubConstants.releaseDirectory), secondURL.lastPathComponent)
+    }
+
+    func testReleaseInstalledByAnEarlierSDKSurvivesTheUpgrade() async throws {
+        // SDK 2.0 installed every release at the fixed update.bundle and persisted no
+        // folder name
+        let fixed = try XCTUnwrap(sut.cacheManager.fixedUpdateBundleUrl)
+        try TestArchives.releaseDirectory(strings: ["en": ["StringPlain": "From SDK 2.0"]], at: fixed)
+        UserDefaults.standard.set("sdk-2.0-release", forKey: LingoHubConstants.distributionVersion)
+        UserDefaults.standard.set(TestConstants.appVersion, forKey: LingoHubConstants.appVersion)
+
+        sut.configureForTests()
+        sut.setLanguage("en")
+
+        XCTAssertTrue(sut.isUpdatedBundleUsed)
+        XCTAssertEqual(sut.distributionVersion, "sdk-2.0-release")
+        XCTAssertEqual(sut.localizedString(forKey: "StringPlain"), "From SDK 2.0")
+
+        // The next install moves on to the release folder
+        await sut.installUpdatedBundle()
+
+        XCTAssertEqual(sut.localizedString(forKey: "StringPlain"), "String")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixed.path))
+        XCTAssertEqual(try installedReleaseNames().count, 1)
+    }
+
+    func testReleaseInstalledButNotPersistedIsDiscarded() async throws {
+        // The app terminated after a new release was moved into place but before its
+        // metadata was persisted: the previous release stays, the new one is removed
+        sut.configureForTests()
+        sut.setLanguage("en")
+        await sut.installUpdatedBundle()
+        let unpersisted = try XCTUnwrap(sut.cacheManager.makeReleaseUrl())
+        try TestArchives.releaseDirectory(strings: ["en": ["StringPlain": "never persisted"]], at: unpersisted)
+
+        sut.configureForTests()
+
+        XCTAssertEqual(sut.distributionVersion, TestConstants.bundleIdentifier)
+        XCTAssertEqual(sut.localizedString(forKey: "StringPlain"), "String")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unpersisted.path))
+        XCTAssertEqual(try installedReleaseNames().count, 1)
+    }
+
+    func testPersistedFolderThatIsMissingOrInvalidIsHealed() async throws {
+        // `outside` looks like a release; a folder name escaping the release folder
+        // must not reach it (…/current/Lingohub/releases/../../../aux/outside, which
+        // resolves once the release folder exists)
+        let outside = auxDir.appendingPathComponent("outside")
+        try TestArchives.releaseDirectory(strings: ["en": ["K": "not a release"]], at: outside)
+        try FileManager.default.createDirectory(at: try XCTUnwrap(sut.cacheManager.releasesFolderUrl), withIntermediateDirectories: true)
+
+        for folderName in ["missing.bundle", "../../../aux/outside"] {
+            UserDefaults.standard.set("ghost-release", forKey: LingoHubConstants.distributionVersion)
+            UserDefaults.standard.set(TestConstants.appVersion, forKey: LingoHubConstants.appVersion)
+            UserDefaults.standard.set(folderName, forKey: LingoHubConstants.releaseDirectory)
+
+            sut.configureForTests()
+
+            XCTAssertFalse(sut.isUpdatedBundleUsed, folderName)
+            XCTAssertNil(UserDefaults.standard.string(forKey: LingoHubConstants.distributionVersion), folderName)
+            XCTAssertNil(UserDefaults.standard.string(forKey: LingoHubConstants.appVersion), folderName)
+            XCTAssertNil(UserDefaults.standard.string(forKey: LingoHubConstants.releaseDirectory), folderName)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: outside.path), "Nothing outside the release storage is touched")
     }
 
     // MARK: - Update coalescing
