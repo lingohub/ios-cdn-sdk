@@ -170,7 +170,65 @@ final class MergedBundleBuilderTests: XCTestCase {
         let merged = try build(app.source)
 
         XCTAssertEqual(lookup("step_1", in: merged, language: "en", table: "Onboarding"), "First step (release)")
-        XCTAssertNil(strings(merged, "de", table: "Onboarding"))
+        // A German lookup of the whole bundle falls back to the development language's
+        // table; the German folder resolves the same on its own
+        XCTAssertEqual(lookup("step_1", in: merged, language: "de", table: "Onboarding"), "First step (release)")
+    }
+
+    // MARK: - Foundation's fallback, per table file
+
+    func testReleaseTableDoesNotHideTheAppsFallbackTable() throws {
+        // The app has Settings only in its development language; a German lookup falls
+        // back to it. A release adding German Settings with other keys must not hide it.
+        let app = try makeApp(strings: [
+            "en": ["Localizable": ["welcome": "Welcome"], "Settings": ["title": "Title (en)"]],
+            "de": ["Localizable": ["welcome": "Willkommen"]],
+        ])
+        try writeRelease(strings: ["de": ["Settings": ["other": "Anderes (Release)"]]])
+
+        let merged = try build(app.source)
+
+        XCTAssertEqual(strings(merged, "de", table: "Settings"), ["title": "Title (en)", "other": "Anderes (Release)"])
+        XCTAssertEqual(lookup("title", in: merged, language: "de", table: "Settings"), "Title (en)")
+        let resource = LocalizedStringResource("title", table: "Settings", locale: Locale(identifier: "de"), bundle: .atURL(merged.bundle.bundleURL))
+        XCTAssertEqual(String(localized: resource), "Title (en)")
+    }
+
+    func testLanguageFoldersAreSelfContained() throws {
+        // Foundation's order for a table file a language lacks: its base language, Base,
+        // then the development language. Each folder resolves it on its own, as the
+        // single-language views that serve setLanguage(_:) require.
+        let app = try makeApp(strings: [
+            "Base": ["Settings": ["title": "Title (Base)"]],
+            "en": ["Localizable": ["welcome": "Welcome"], "Settings": ["title": "Title (en)"], "Help": ["faq": "FAQ (en)"]],
+            "de": ["Localizable": ["welcome": "Willkommen"], "Help": ["faq": "FAQ (de)"]],
+            "de-AT": ["Localizable": ["welcome": "Servus"]],
+        ])
+        try writeRelease(strings: ["en": ["Localizable": ["welcome": "Welcome (release)"]]])
+
+        let merged = try build(app.source)
+
+        XCTAssertEqual(lookup("title", in: merged, language: "de", table: "Settings"), "Title (Base)", "Base before the development language")
+        XCTAssertEqual(lookup("faq", in: merged, language: "de-AT", table: "Help"), "FAQ (de)", "The base language first")
+        XCTAssertEqual(lookup("title", in: merged, language: "de-AT", table: "Settings"), "Title (Base)")
+        XCTAssertEqual(lookup("welcome", in: merged, language: "de-AT"), "Servus")
+    }
+
+    func testNonlocalizedAppTablesAreTheBase() throws {
+        // Tables directly in the app's resources, outside any .lproj, win over localized
+        // ones in Foundation; they are the base the release is laid over
+        let app = try makeApp(strings: ["en": ["Other": ["x": "y"]]])
+        let resources = try XCTUnwrap(app.bundle.resourceURL)
+        try PropertyListSerialization.data(fromPropertyList: ["welcome": "Welcome (root)", "only_app": "Root fallback"], format: .binary, options: 0)
+            .write(to: resources.appendingPathComponent("Localizable.strings"))
+        try writeRelease(strings: ["en": ["Localizable": ["welcome": "Welcome (release)"]]])
+
+        let merged = try build(app.source)
+
+        XCTAssertEqual(lookup("welcome", in: merged, language: "en"), "Welcome (release)")
+        XCTAssertEqual(lookup("only_app", in: merged, language: "en"), "Root fallback")
+        XCTAssertEqual(String(localized: "only_app", bundle: merged.bundle), "Root fallback")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: merged.url.appendingPathComponent("Localizable.strings").path), "A root table would hide every language's merged table")
     }
 
     func testMacOSMetadataInTheReleaseIsIgnored() throws {
@@ -254,8 +312,13 @@ final class MergedBundleBuilderTests: XCTestCase {
         let appTable = try XCTUnwrap(app.bundle.resourceURL).appendingPathComponent("en.lproj/Localizable.strings")
         let changed = try PropertyListSerialization.data(fromPropertyList: ["welcome": "Welcome to the new build"], format: .binary, options: 0)
         try changed.write(to: appTable)
+        let afterLocalizedChange = app.source.fingerprint()
+        XCTAssertNotEqual(afterLocalizedChange, fingerprint)
 
-        XCTAssertNotEqual(app.source.fingerprint(), fingerprint)
+        // Nonlocalized tables at the resources root count too
+        let rootTable = try XCTUnwrap(app.bundle.resourceURL).appendingPathComponent("Localizable.strings")
+        try PropertyListSerialization.data(fromPropertyList: ["only_app": "Root"], format: .binary, options: 0).write(to: rootTable)
+        XCTAssertNotEqual(app.source.fingerprint(), afterLocalizedChange)
     }
 
     func testReusableRequiresTheExactManifest() throws {

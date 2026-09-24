@@ -419,7 +419,6 @@ extension LingoHubSDK {
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Could not determine storage location", errorCodes: [])
         }
 
-        let replacedMergedBundle = cacheManager.currentSnapshot?.mergedBundle
         let installed: UpdateInstaller.InstallResult
         do {
             try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
@@ -447,14 +446,8 @@ extension LingoHubSDK {
 
         cacheManager.persistRelease(at: releaseURL, distributionVersion: identifier, appVersion: appVersion)
 
-        // Keep the merged bundle this release replaces: views rendered before they
-        // refresh on the notification below may still resolve against it.
-        if let mergedFolderURL = cacheManager.mergedBundlesFolderUrl {
-            let kept = [mergedBundle?.url, replacedMergedBundle?.url].compactMap { $0 }
-            enqueueMergedBundleWork { [installer] in
-                await installer.removeMergedBundles(in: mergedFolderURL, keeping: kept)
-            }
-        }
+        // The replaced merged bundle stays until the next launch (see
+        // `LocalizationCacheManager.mergedBundlesInUse`).
 
         // The snapshot swap above already cleared all caches, so observers that read
         // localized strings synchronously get content from the new release.
@@ -477,8 +470,8 @@ extension LingoHubSDK {
         guard let snapshot = cacheManager.currentSnapshot else {
             // No release: whatever merged bundles are left over belong to a discarded one
             if FileManager.default.fileExists(atPath: folderURL.path) {
-                enqueueMergedBundleWork { [installer] in
-                    await installer.removeMergedBundles(in: folderURL, keeping: [])
+                enqueueMergedBundleWork {
+                    await self.removeUnusedMergedBundles(in: folderURL)
                 }
             }
             return
@@ -494,16 +487,15 @@ extension LingoHubSDK {
         if let mergedBundle = MergedBundle.reusable(matching: manifest, in: folderURL),
            cacheManager.attachMergedBundle(mergedBundle, toSnapshot: snapshotID) {
             LingoHubLogger.shared.log("Merged bundle: reusing \(mergedBundle.url.lastPathComponent)")
-            let keptURL = mergedBundle.url
-            enqueueMergedBundleWork { [installer] in
-                await installer.removeMergedBundles(in: folderURL, keeping: [keptURL])
+            enqueueMergedBundleWork {
+                await self.removeUnusedMergedBundles(in: folderURL)
             }
             return
         }
 
         guard let builder = mergedBundleBuilder(distributionVersion: distributionVersion) else { return }
         enqueueMergedBundleWork { [installer, cacheManager] in
-            await installer.removeMergedBundles(in: folderURL, keeping: [])
+            await self.removeUnusedMergedBundles(in: folderURL)
             let mergedBundle: MergedBundle
             do {
                 mergedBundle = try await installer.buildMergedBundle(builder, from: releaseURL)
@@ -514,13 +506,20 @@ extension LingoHubSDK {
             }
             guard cacheManager.attachMergedBundle(mergedBundle, toSnapshot: snapshotID) else {
                 // configure ran again or the release was discarded while this was
-                // building: keep only what the active snapshot uses
-                let activeURL = cacheManager.currentSnapshot?.mergedBundle?.url
-                await installer.removeMergedBundles(in: folderURL, keeping: activeURL.map { [$0] } ?? [])
+                // building: this bundle was never handed out
+                await self.removeUnusedMergedBundles(in: folderURL)
                 return
             }
             NotificationCenter.default.post(name: .LingoHubDidUpdateLocalization, object: nil)
         }
+    }
+
+    /// Removes merged bundles this process never activated: leftovers of earlier
+    /// launches and builds that were superseded before being attached. Bundles
+    /// activated in this process stay until the next launch (see
+    /// `LocalizationCacheManager.mergedBundlesInUse`).
+    private func removeUnusedMergedBundles(in folderURL: URL) async {
+        await installer.removeMergedBundles(in: folderURL, keeping: cacheManager.mergedBundlesInUse)
     }
 
     /// Builds merged bundles for `distributionVersion` from the app bundle's tables.

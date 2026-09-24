@@ -7,8 +7,9 @@
 
 import Foundation
 
-/// The compiled string tables of every `<language>.lproj` directly inside a directory:
-/// the layout Foundation resolves, and the only one the CDN produces.
+/// The compiled string tables of every `<language>.lproj` directly inside a directory
+/// (the layout Foundation resolves, and the only one the CDN produces), plus, on
+/// request, the nonlocalized tables directly in it (an app bundle can have those).
 struct StringTableIndex {
     /// The files of one table: `<name>.strings` and/or `<name>.stringsdict`.
     struct Table {
@@ -18,47 +19,69 @@ struct StringTableIndex {
 
     /// Language (the `.lproj` name without extension) → table name → files.
     private(set) var languages: [String: [String: Table]] = [:]
+    /// Table name → files outside any `.lproj`; empty unless requested.
+    private(set) var rootTables: [String: Table] = [:]
 
-    /// - Parameter keys: resource values to prefetch for every table file.
-    init(directory: URL?, prefetching keys: [URLResourceKey] = []) {
+    /// - Parameters:
+    ///   - includingRootTables: Also index nonlocalized tables directly in `directory`.
+    ///   - keys: Resource values to prefetch for every table file.
+    init(directory: URL?, includingRootTables: Bool = false, prefetching keys: [URLResourceKey] = []) {
         let fileManager = FileManager.default
         guard let directory,
-              let entries = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey]) else {
+              let entries = try? fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey] + keys) else {
             return
         }
-        for lproj in entries where lproj.pathExtension == "lproj" && (try? lproj.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
-            let files = (try? fileManager.contentsOfDirectory(at: lproj, includingPropertiesForKeys: keys)) ?? []
-            var tables: [String: Table] = [:]
-            for file in files where !file.lh_isMacOSMetadata {
-                let name = file.deletingPathExtension().lastPathComponent
-                switch file.pathExtension {
-                case "strings":
-                    tables[name, default: Table()].strings = file
-                case "stringsdict":
-                    tables[name, default: Table()].stringsdict = file
-                default:
-                    continue
+        var rootFiles: [URL] = []
+        for entry in entries {
+            if entry.pathExtension == "lproj", (try? entry.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true {
+                let files = (try? fileManager.contentsOfDirectory(at: entry, includingPropertiesForKeys: keys)) ?? []
+                let tables = Self.tables(in: files)
+                if !tables.isEmpty {
+                    languages[entry.deletingPathExtension().lastPathComponent] = tables
                 }
-            }
-            if !tables.isEmpty {
-                languages[lproj.deletingPathExtension().lastPathComponent] = tables
+            } else {
+                rootFiles.append(entry)
             }
         }
+        if includingRootTables {
+            rootTables = Self.tables(in: rootFiles)
+        }
+    }
+
+    private static func tables(in files: [URL]) -> [String: Table] {
+        var tables: [String: Table] = [:]
+        for file in files where !file.lh_isMacOSMetadata {
+            let name = file.deletingPathExtension().lastPathComponent
+            switch file.pathExtension {
+            case "strings":
+                tables[name, default: Table()].strings = file
+            case "stringsdict":
+                tables[name, default: Table()].stringsdict = file
+            default:
+                continue
+            }
+        }
+        return tables
     }
 
     /// Every table file in the index.
     var files: [URL] {
-        return languages.values.flatMap { tables in
-            tables.values.flatMap { [$0.strings, $0.stringsdict].compactMap { $0 } }
-        }
+        let tables = languages.values.flatMap(\.values) + rootTables.values
+        return tables.flatMap { [$0.strings, $0.stringsdict].compactMap { $0 } }
     }
 }
 
-/// Builds the merged bundle for one release: for every language and table of the app
-/// bundle and the release, the app's compiled table with the release's entries laid
-/// over it. Tables the release does not touch are copied unchanged (a copy-on-write
-/// clone on APFS). A language only the release has gets the app's development-language
-/// tables as its base, so keys the release lacks still read as bundled text.
+/// Builds the merged bundle for one release: every language folder holds, for each
+/// table, the app table a Foundation lookup in that language resolves, with the
+/// release's entries laid over it. Tables the release does not touch are copied
+/// unchanged (a copy-on-write clone on APFS).
+///
+/// Foundation resolves a table file by file, in this order: a nonlocalized file at the
+/// resources root, the language, its base language (`de` for `de-AT`), `Base`, and the
+/// development language. The merged bundle resolves that per language up front, so a
+/// table the release adds for a language cannot hide the app's fallback for the keys
+/// the release lacks, and every language folder is self-contained, which the
+/// single-language views that serve `setLanguage(_:)` rely on.
 ///
 /// The build happens in a staging directory and is published with a single rename,
 /// under a fresh name: Foundation caches bundles and their tables by path, so a path is
@@ -123,19 +146,59 @@ struct MergedBundleBuilder: Sendable {
     }
 
     private func writeTables(from releaseURL: URL, into bundleURL: URL) throws {
-        let app = StringTableIndex(directory: source.resourcesURL)
+        let app = StringTableIndex(directory: source.resourcesURL, includingRootTables: true)
         let release = StringTableIndex(directory: releaseURL)
-        let developmentTables = app.languages[source.developmentRegion] ?? app.languages["Base"] ?? [:]
 
         for language in Set(app.languages.keys).union(release.languages.keys) {
-            let appTables = app.languages[language] ?? developmentTables
+            let fallbacks = fallbackLanguages(of: language)
+            let appTables = effectiveTables(for: [language] + fallbacks, in: app)
             let releaseTables = release.languages[language] ?? [:]
+            var tables: [String: (app: StringTableIndex.Table?, release: StringTableIndex.Table?)] = [:]
+            for name in Set(appTables.keys).union(releaseTables.keys) {
+                tables[name] = (appTables[name], releaseTables[name])
+            }
+            // A table neither the app nor this language's release has, but a fallback
+            // language's release does, resolves there for a lookup of the whole bundle
+            for fallback in fallbacks {
+                for (name, releaseTable) in release.languages[fallback] ?? [:] where tables[name] == nil {
+                    tables[name] = (nil, releaseTable)
+                }
+            }
+
             let lprojURL = bundleURL.appendingPathComponent(language + ".lproj")
             try FileManager.default.createDirectory(at: lprojURL, withIntermediateDirectories: false)
-            for table in Set(appTables.keys).union(releaseTables.keys) {
-                try writeTable(named: table, app: appTables[table], release: releaseTables[table], into: lprojURL)
+            for (name, table) in tables {
+                try writeTable(named: name, app: table.app, release: table.release, into: lprojURL)
             }
         }
+    }
+
+    /// The languages Foundation falls back to, in order, for a table file missing in
+    /// `language`: its base language, `Base`, and the development language.
+    private func fallbackLanguages(of language: String) -> [String] {
+        var fallbacks: [String] = []
+        if let baseLanguage = language.split(separator: "-").first.map(String.init), baseLanguage != language {
+            fallbacks.append(baseLanguage)
+        }
+        for fallback in ["Base", source.developmentRegion] where fallback != language && !fallbacks.contains(fallback) {
+            fallbacks.append(fallback)
+        }
+        return fallbacks
+    }
+
+    /// For every app table, the file a lookup through `searchOrder` resolves, file by
+    /// file: a nonlocalized root file wins, then the first language that has it.
+    private func effectiveTables(for searchOrder: [String], in app: StringTableIndex) -> [String: StringTableIndex.Table] {
+        let localized = searchOrder.compactMap { app.languages[$0] }
+        var tables: [String: StringTableIndex.Table] = [:]
+        for name in Set(app.rootTables.keys).union(localized.flatMap(\.keys)) {
+            let candidates = [app.rootTables[name]] + localized.map { $0[name] }
+            tables[name] = StringTableIndex.Table(
+                strings: candidates.lazy.compactMap { $0?.strings }.first,
+                stringsdict: candidates.lazy.compactMap { $0?.stringsdict }.first
+            )
+        }
+        return tables
     }
 
     private func writeTable(named name: String, app: StringTableIndex.Table?, release: StringTableIndex.Table?, into lprojURL: URL) throws {

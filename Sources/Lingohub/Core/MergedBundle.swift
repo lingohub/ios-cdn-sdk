@@ -74,13 +74,18 @@ extension MergedBundle {
     }
 
     /// Deletes everything in `folder` except the merged bundles at `kept`: superseded
-    /// merged bundles and leftovers of interrupted builds.
+    /// merged bundles and leftovers of interrupted builds. Best effort; failures are
+    /// logged.
     static func removeAll(in folder: URL, keeping kept: [URL]) {
         let keptNames = Set(kept.map(\.lastPathComponent))
         let entries = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? []
         for entry in entries where !keptNames.contains(entry.lastPathComponent) {
-            LingoHubLogger.shared.log("Merged bundle: removing \(entry.lastPathComponent)")
-            try? FileManager.default.removeItem(at: entry)
+            do {
+                try FileManager.default.removeItem(at: entry)
+                LingoHubLogger.shared.log("Merged bundle: removed \(entry.lastPathComponent)")
+            } catch {
+                LingoHubLogger.shared.log("Merged bundle: could not remove \(entry.lastPathComponent): \(error)")
+            }
         }
     }
 }
@@ -159,7 +164,7 @@ struct MergedBundleSource: Sendable {
         let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
         var hasher = SHA256()
         hasher.update(data: Data("\(version)|\(developmentRegion)".utf8))
-        let files = StringTableIndex(directory: resourcesURL, prefetching: Array(keys)).files
+        let files = StringTableIndex(directory: resourcesURL, includingRootTables: true, prefetching: Array(keys)).files
         for file in files.sorted(by: { $0.path < $1.path }) {
             let values = try? file.resourceValues(forKeys: keys)
             let modified = values?.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0

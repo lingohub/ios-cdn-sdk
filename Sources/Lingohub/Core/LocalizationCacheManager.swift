@@ -54,6 +54,10 @@ final class LocalizationCacheManager: @unchecked Sendable {
     // runs; the next launch removes those no metadata refers to.
     private var releasesInUse: Set<String> = []
     private var lastSnapshotID: UInt64 = 0
+    // Every merged bundle activated in this process. Views and resources may still
+    // resolve against any of them, and Foundation reads their tables lazily, so none is
+    // deleted while the process runs; the next launch removes the unused ones.
+    private var _mergedBundlesInUse: Set<URL> = []
     private var _language: String?
     private var _swizzledBundlePaths: [String] = []
     // Storage roots can be overridden (by tests) so nothing ever touches the real
@@ -154,6 +158,9 @@ final class LocalizationCacheManager: @unchecked Sendable {
             languageBundleCache.removeAll()
             cacheGeneration &+= 1
             releasesInUse.insert(bundleURL.path)
+            if let mergedBundle {
+                _mergedBundlesInUse.insert(mergedBundle.url)
+            }
         }
         LingoHubLogger.shared.log("Cache Manager: activated release \(distributionVersion)")
         return true
@@ -168,8 +175,19 @@ final class LocalizationCacheManager: @unchecked Sendable {
         return lock.lh_withLock {
             guard _snapshot?.id == snapshotID else { return false }
             _snapshot?.mergedBundle = mergedBundle
+            _mergedBundlesInUse.insert(mergedBundle.url)
             return true
         }
+    }
+
+    /// The merged bundles activated in this process (see `_mergedBundlesInUse`).
+    var mergedBundlesInUse: [URL] {
+        return lock.lh_withLock { Array(_mergedBundlesInUse) }
+    }
+
+    /// Forgets which merged bundles this process activated, as a new process would. Test hook.
+    func forgetMergedBundlesInUse() {
+        lock.lh_withLock { _mergedBundlesInUse.removeAll() }
     }
 
     /// The bundle Swift-native lookups use (`Bundle.lingohub`), or nil when no merged

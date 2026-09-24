@@ -435,6 +435,7 @@ final class LingoHubBundleTests: XCTestCase {
         try PropertyListSerialization.data(fromPropertyList: newBuild, format: .binary, options: 0).write(to: table)
 
         let rebuilt = expectation(forNotification: .LingoHubDidUpdateLocalization, object: nil)
+        sut.cacheManager.forgetMergedBundlesInUse() // a new process
         sut.configureForTests()
         XCTAssertTrue(Bundle.lingohub === Bundle.main, "An outdated merged bundle is never served")
         await fulfillment(of: [rebuilt], timeout: 10)
@@ -461,22 +462,46 @@ final class LingoHubBundleTests: XCTestCase {
         XCTAssertEqual(String(localized: "welcome", bundle: .lingohub), "Welcome (release)")
     }
 
-    func testSupersededMergedBundlesAreRemoved() async throws {
+    func testMergedBundlesHandedOutStayUntilTheNextLaunch() async throws {
         sut.configureForTests()
         try await installRelease("release-1")
+        let first = try XCTUnwrap(mergedBundleURL)
         try await installRelease("release-2")
         let second = try XCTUnwrap(mergedBundleURL)
         try await installRelease("release-3")
         let third = try XCTUnwrap(mergedBundleURL)
         await sut.waitForMergedBundleWork()
 
-        // The bundle release 3 replaced stays until the next launch: views that have not
-        // refreshed yet may still resolve against it
-        XCTAssertEqual(try mergedFolderContents(), [second.lastPathComponent, third.lastPathComponent])
+        // Views and resources may still resolve against any of them
+        let all: Set<String> = [first.lastPathComponent, second.lastPathComponent, third.lastPathComponent]
+        XCTAssertEqual(try mergedFolderContents(), all)
 
+        // Configuring again in the same process keeps them
+        sut.configureForTests()
+        await sut.waitForMergedBundleWork()
+        XCTAssertEqual(try mergedFolderContents(), all)
+
+        // The next launch removes the superseded ones
+        sut.cacheManager.forgetMergedBundlesInUse()
         sut.configureForTests()
         await sut.waitForMergedBundleWork()
         XCTAssertEqual(try mergedFolderContents(), [third.lastPathComponent])
+    }
+
+    func testStoredResourceOfAnEarlierReleaseStillResolves() async throws {
+        // Foundation loads tables lazily: a resource created while release 1 was active,
+        // looking up a table nothing has loaded yet, must still resolve after two more
+        // releases replaced its merged bundle
+        sut.configureForTests()
+        sut.setLanguage("en")
+        try await installRelease("release-1")
+        let stored = LocalizedStringResource("title", table: "Settings", locale: Locale(identifier: "en"), bundle: .atURL(Bundle.lingohub.bundleURL))
+
+        try await installRelease("release-2")
+        try await installRelease("release-3")
+        await sut.waitForMergedBundleWork()
+
+        XCTAssertEqual(String(localized: stored), "Settings (app)")
     }
 
     func testReleaseStaysActiveWhenItsMergedBundleCannotBeBuilt() async throws {
