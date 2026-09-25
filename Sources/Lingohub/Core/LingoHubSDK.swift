@@ -380,6 +380,9 @@ extension LingoHubSDK {
             schedule.recordSuccess(at: now)
             persist(schedule, of: context)
             return updated
+        } catch is CycleSuperseded {
+            LingoHubLogger.shared.log("The SDK was reconfigured during the update check; the check stopped without changes")
+            return false
         } catch {
             // Keeps what the cycle recorded: a pause, or the end of a series of 5xx
             persist(schedule, of: context)
@@ -401,12 +404,26 @@ extension LingoHubSDK {
         }
     }
 
+    /// Thrown by a cycle that finds its configuration replaced after one of its waits. It
+    /// then stops without changes: no further request, no install, no schedule update. Its
+    /// callers get `false`: nothing new was installed.
+    private struct CycleSuperseded: Error {}
+
+    /// Whether `context` is still the SDK's configuration.
+    private func isCurrent(_ context: CycleContext) -> Bool {
+        guard let apiKey, let appVersion else { return false }
+        return context.scope == UpdateSchedule.Scope(appVersion: appVersion, environment: environment, apiKey: apiKey)
+    }
+
+    private func ensureCurrent(_ context: CycleContext) throws {
+        guard isCurrent(context) else { throw CycleSuperseded() }
+    }
+
     /// Saves what a cycle recorded, unless the app reconfigured the SDK while it ran: the
     /// schedule then belongs to a scope no longer in use, and saving it would replace the
     /// current scope's schedule.
     private func persist(_ schedule: UpdateSchedule, of context: CycleContext) {
-        guard let apiKey, let appVersion,
-              context.scope == UpdateSchedule.Scope(appVersion: appVersion, environment: environment, apiKey: apiKey) else {
+        guard isCurrent(context) else {
             LingoHubLogger.shared.log("The SDK was reconfigured during the update check; its schedule is not saved")
             return
         }
@@ -416,6 +433,9 @@ extension LingoHubSDK {
     /// Checks for a release, downloads and installs it. A download the storage refuses
     /// (an expired URL, a 5xx) gets one fresh check for a new URL; every other failure
     /// ends the cycle, and the next `update()` call is the retry.
+    ///
+    /// After each of its waits the cycle makes sure its configuration is still the SDK's:
+    /// a release for a configuration the app has left must never replace the active one.
     private func runUpdateCycle(_ context: CycleContext, schedule: inout UpdateSchedule) async throws -> Bool {
         guard var release = try await check(context, schedule: &schedule, retryingServerErrors: true) else {
             return false
@@ -423,18 +443,23 @@ extension LingoHubSDK {
 
         let archiveURL: URL
         do {
+            try ensureCurrent(context)
             archiveURL = try await download(release)
         } catch APIError.apiError(let statusCode, _, _, _) where statusCode > 0 {
             LingoHubLogger.shared.log("Download failed with HTTP \(statusCode), checking again for a fresh download URL")
+            try ensureCurrent(context)
             guard let freshRelease = try await check(context, schedule: &schedule, retryingServerErrors: false) else {
                 return false
             }
             release = freshRelease
+            try ensureCurrent(context)
             archiveURL = try await download(release)
         }
         defer { try? FileManager.default.removeItem(at: archiveURL) }
 
-        try await installArchive(at: archiveURL, identifier: release.id, appVersion: context.appVersion, expectedSha256: release.filesSha256)
+        try await installArchive(at: archiveURL, identifier: release.id, appVersion: context.appVersion, expectedSha256: release.filesSha256) {
+            self.isCurrent(context)
+        }
         return true
     }
 
@@ -475,6 +500,7 @@ extension LingoHubSDK {
                 if retryingServerErrors, let delay = UpdatePolicy.serverErrorRetryDelay(retryAfter: retryAfter) {
                     LingoHubLogger.shared.log("Server error (HTTP \(statusCode)), retrying once in \(String(format: "%.1f", delay)) s")
                     try await waitBeforeRetry(delay)
+                    try ensureCurrent(context)
                     return try await check(context, schedule: &schedule, retryingServerErrors: false)
                 }
                 schedule.recordServerError(statusCode: statusCode, errorCodes: infos, retryAfter: retryAfter, at: now)
@@ -561,7 +587,12 @@ extension LingoHubSDK {
     /// lookups and `Bundle.lingohub` alike. The replaced release stays on disk until the
     /// next launch: lookups that resolved it before the swap still read from it, and it
     /// remains the fallback should the new release's metadata not reach disk.
-    func installArchive(at archiveURL: URL, identifier: String, appVersion: String, expectedSha256: String? = nil) async throws {
+    ///
+    /// `isStillWanted` is asked right before the activation, after the last suspension
+    /// point, so nothing can change its answer before the new release is live. An update
+    /// cycle passes whether its configuration is still the SDK's; when it isn't, the staged
+    /// release is removed and `CycleSuperseded` thrown.
+    func installArchive(at archiveURL: URL, identifier: String, appVersion: String, expectedSha256: String? = nil, isStillWanted: () -> Bool = { true }) async throws {
         // Let launch-time merged-bundle work finish first, so installs and merged-bundle
         // work run strictly in order.
         await pendingMergedBundleWork?.value
@@ -589,6 +620,12 @@ extension LingoHubSDK {
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Failed to install bundle: \(error.localizedDescription)", errorCodes: [])
         }
         let mergedBundle = installed.mergedBundle
+
+        guard isStillWanted() else {
+            // The merged bundle built for it is never activated; the next launch removes it
+            await installer.removeRelease(at: releaseURL)
+            throw CycleSuperseded()
+        }
 
         // Downloaded translations are re-downloadable, keep them out of device backups
         cacheManager.excludeFromBackup(folderURL)

@@ -339,11 +339,8 @@ final class UpdateSchedulingTests: XCTestCase {
         XCTAssertEqual(api.checkedEnvironments, [.production, .staging, .staging, .production])
     }
 
-    func testReconfiguringDuringTheRetryWaitKeepsTheCycleOnItsConfiguration() async throws {
-        let api = script(checks: [
-            .failure(ScriptedAPIClient.httpError(503)),
-            .failure(ScriptedAPIClient.httpError(429, infos: ["USAGE_LIMIT_EXCEEDED"]))
-        ])
+    func testReconfiguringDuringTheRetryWaitStopsTheCycleWithoutChanges() async throws {
+        let api = script(checks: [.failure(ScriptedAPIClient.httpError(503)), ScriptedAPIClient.release()])
         let stagingScope = UpdateSchedule.Scope(appVersion: TestConstants.appVersion, environment: .staging, apiKey: TestConstants.apiKey)
         let stagingPauseUntil = clock.now + 60 * minute
         let sdk = sut
@@ -359,10 +356,37 @@ final class UpdateSchedulingTests: XCTestCase {
             }
         }
 
-        await assertUpdateFails(statusCode: 429)
+        let updated = try await sut.updateAsync()
 
-        XCTAssertEqual(api.checkedEnvironments, [.production, .production], "The retry belongs to the cycle it retries")
+        XCTAssertFalse(updated, "Nothing was installed")
+        XCTAssertEqual(api.checkedEnvironments, [.production], "No retry for a configuration the app has left")
+        XCTAssertNil(sut.distributionVersion)
         XCTAssertEqual(UpdateSchedule.load(scope: stagingScope).cooldown?.until, stagingPauseUntil, "A replaced cycle must not overwrite the current schedule")
+    }
+
+    func testReconfiguringBeforeTheActivationKeepsTheCurrentRelease() async throws {
+        sut.environment = .staging
+        let api = script(
+            checks: [ScriptedAPIClient.release(id: "staging-release"), ScriptedAPIClient.release(id: "production-release")],
+            downloads: [try ScriptedAPIClient.archive(), try ScriptedAPIClient.archive()]
+        )
+        let installedStaging = try await sut.updateAsync()
+        XCTAssertTrue(installedStaging)
+        XCTAssertEqual(sut.distributionVersion, "staging-release")
+
+        // The app switches to production, then back to staging while production's release downloads
+        sut.environment = .production
+        let sdk = sut
+        api.duringDownload = {
+            await MainActor.run { sdk.environment = .staging }
+        }
+        let installedProduction = try await sut.updateAsync()
+
+        XCTAssertFalse(installedProduction)
+        XCTAssertEqual(api.checkedEnvironments, [.staging, .production])
+        XCTAssertEqual(sut.distributionVersion, "staging-release", "A release for a configuration the app has left must not replace the active one")
+        let releases = try FileManager.default.contentsOfDirectory(atPath: try XCTUnwrap(sut.cacheManager.releasesFolderUrl).path)
+        XCTAssertEqual(releases.count, 1, "Its staged release is removed")
     }
 
     // MARK: - Client errors

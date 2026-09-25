@@ -37,19 +37,27 @@ final class ScriptedAPIClient: APIClientProtocol, @unchecked Sendable {
         return try answer.get()
     }
 
+    /// Runs while a download is in flight, for tests that change the SDK meanwhile.
+    var duringDownload: (@Sendable () async -> Void)? {
+        get { lock.lh_withLock { _duringDownload } }
+        set { lock.lh_withLock { _duringDownload = newValue } }
+    }
+    private var _duringDownload: (@Sendable () async -> Void)?
+
     func download(from url: URL, maxSize: Int64?) async throws -> URL {
         let answer: DownloadAnswer = lock.lh_withLock {
             _downloadedURLs.append(url)
             return downloadAnswers.isEmpty ? .failure(ScriptExhausted()) : downloadAnswers.removeFirst()
         }
+        await duringDownload?()
         return try answer.get()
     }
 }
 
 extension ScriptedAPIClient {
-    /// A 200 offering the test release for download from `filesUrl`.
-    static func release(filesUrl: String = "https://s3.amazon.de/update.zip") -> CheckAnswer {
-        return .success(BundleInfo(id: TestConstants.bundleIdentifier, name: "Test Bundle", filesUrl: URL(string: filesUrl)!, filesSha256: nil))
+    /// A 200 offering release `id` of the test archive for download from `filesUrl`.
+    static func release(filesUrl: String = "https://s3.amazon.de/update.zip", id: String = TestConstants.bundleIdentifier) -> CheckAnswer {
+        return .success(BundleInfo(id: id, name: "Test Bundle", filesUrl: URL(string: filesUrl)!, filesSha256: nil))
     }
 
     /// A 204: nothing new.
