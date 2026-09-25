@@ -388,7 +388,7 @@ final class LingoHubSDKTests: XCTestCase {
 
     func testUsageLimitCooldown() async throws {
         sut.configureForTests()
-        XCTAssertNil(sut.usageLimitCooldownUntil)
+        XCTAssertNil(sut.storedUpdateSchedule.cooldown)
 
         MockService.mockUpdate429()
 
@@ -412,7 +412,7 @@ final class LingoHubSDKTests: XCTestCase {
         await fulfillment(of: [expectation], timeout: 3.0)
 
         // The cooldown is active: the next check fails immediately, without a network request
-        XCTAssertNotNil(sut.usageLimitCooldownUntil)
+        XCTAssertNotNil(sut.storedUpdateSchedule.cooldown)
 
         let secondExpectation = XCTestExpectation()
         sut.update { result in

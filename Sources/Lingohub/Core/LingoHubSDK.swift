@@ -19,6 +19,17 @@ import Foundation
 
     public var environment: Environment = .production
 
+    /**
+     The minimum time between update checks, in seconds. For this long after the last
+     successful update, `update(result:)` and `updateAsync()` report `false` without
+     contacting the CDN, so you can call them whenever your app becomes active.
+
+     Defaults to 15 minutes, and to 0 in debug builds so that every call checks while you
+     develop. Pauses after failed checks apply regardless of it; see "Failures and
+     retries" in the README.
+     */
+    public var minimumCheckInterval: TimeInterval = UpdatePolicy.defaultMinimumCheckInterval
+
     @objc var apiKey: String?
     @objc var appVersion: String?
     @objc var sdkVersion: String?
@@ -63,6 +74,15 @@ import Foundation
     /// and merged-bundle work run strictly in order.
     var pendingMergedBundleWork: Task<Void, Never>?
 
+    /// Replaces the time update checks are paced by, so tests move it instead of waiting.
+    var clockOverride: (@Sendable () -> Date)?
+
+    /// Replaces the wait before the retry after a 5xx, so tests record it instead of waiting.
+    var retryWaitOverride: (@Sendable (TimeInterval) async throws -> Void)?
+
+    /// Client errors already logged in this process (see `logAPIError`).
+    private var loggedClientErrors: Set<String> = []
+
     @objc var swizzledBundles: [String] {
         get { cacheManager.swizzledBundlePaths }
         set { cacheManager.swizzledBundlePaths = newValue }
@@ -101,6 +121,10 @@ public extension LingoHubSDK {
 
         // Move translations downloaded by SDK 1.0.x from Documents to Application Support
         cacheManager.migrateLegacyStorageIfNeeded()
+
+        // SDK 1.1 to 2.0 kept the pause after a 429 under a key of its own; the update
+        // schedule replaced it
+        UserDefaults.standard.removeObject(forKey: LingoHubConstants.legacyUsageCooldownUntil)
 
         // Remove staging directories a crashed install may have left behind
         cacheManager.removeStagingLeftovers()
@@ -203,6 +227,11 @@ public extension LingoHubSDK {
      The closure is always called on the main queue. Concurrent calls share one
      update cycle and receive the same result.
 
+     Call it whenever your app becomes active: within ``minimumCheckInterval`` after the
+     last successful update, it reports `false` without contacting the CDN, and while a
+     failure has paused update checks, it reports that failure the same way (see
+     "Failures and retries" in the README).
+
      - Parameter result: Closure to check for updated content. `True` means the content was updated, `False` that there was no new content.
      */
     func update(result: (@Sendable (Result<Bool, LingoHubSDKError>) -> Void)? = nil) {
@@ -227,6 +256,10 @@ public extension LingoHubSDK {
 
      Concurrent calls join the running update cycle and receive its result instead
      of starting a second network round-trip.
+
+     Within ``minimumCheckInterval`` after the last successful update, it returns
+     `false` without contacting the CDN, and while a failure has paused update checks, it
+     throws that failure the same way (see "Failures and retries" in the README).
 
      Cancellation: the shared update cycle itself is never cancelled — once started,
      it always runs to completion so a joined caller's cancellation cannot abort work
@@ -310,9 +343,56 @@ public extension Notification.Name {
 // MARK: Update Cycle
 
 extension LingoHubSDK {
-    /// Runs one complete update cycle: check → download → verify → install → publish.
+    /// Runs update cycles until one ends with the SDK's current configuration. A cycle
+    /// that finds the SDK reconfigured stops without changes, and a new cycle runs with
+    /// the new configuration: callers waiting for the update get the result of that one.
     /// Throws `LingoHubSDKError` exclusively.
     private func performUpdate() async throws -> Bool {
+        while true {
+            let context = try currentCycleContext()
+            do {
+                return try await performUpdate(with: context)
+            } catch is CycleSuperseded {
+                LingoHubLogger.shared.log("The SDK was reconfigured during the update check, checking again with the new configuration")
+            }
+        }
+    }
+
+    /// Runs one complete update cycle — check → download → verify → install → publish —
+    /// paced by the persisted `UpdateSchedule` (see `UpdatePolicy`). Throws
+    /// `CycleSuperseded` once the SDK no longer has `context`'s configuration, and
+    /// `LingoHubSDKError` otherwise.
+    private func performUpdate(with context: CycleContext) async throws -> Bool {
+        var schedule = UpdateSchedule.load(scope: context.scope)
+        switch schedule.decision(at: now, minimumInterval: minimumCheckInterval) {
+        case .paused(let cooldown):
+            LingoHubLogger.shared.log("Update checks are paused until \(cooldown.until) after HTTP \(cooldown.statusCode), skipping the check")
+            throw cooldown.error
+        case .skip(let nextCheck):
+            LingoHubLogger.shared.log("Last successful update is recent, skipping the check until \(nextCheck)")
+            return false
+        case .check:
+            break
+        }
+
+        do {
+            let updated = try await runUpdateCycle(context, schedule: &schedule)
+            // An answer that arrived after the app reconfigured the SDK is void
+            try ensureCurrent(context)
+            schedule.recordSuccess(at: now)
+            schedule.save()
+            return updated
+        } catch {
+            // So is a failure after it, and with it what the cycle recorded
+            try ensureCurrent(context)
+            // Keeps what the cycle recorded: a pause, or the end of a series of 5xx
+            schedule.save()
+            throw sdkError(for: error)
+        }
+    }
+
+    /// The SDK's configuration, for a new update cycle.
+    private func currentCycleContext() throws -> CycleContext {
         guard let sdkVersion = sdkVersion else {
             LingoHubLogger.shared.log("Error: Invalid SDK version")
             throw LingoHubSDKError.invalidSdkVersion
@@ -328,75 +408,186 @@ extension LingoHubSDK {
             throw LingoHubSDKError.invalidApiKey
         }
 
-        // After a 429 (usage budget exhausted) the SDK pauses update checks for a while
-        // instead of hammering the CDN.
-        if let cooldownUntil = usageLimitCooldownUntil, cooldownUntil > Date() {
-            LingoHubLogger.shared.log("Usage limit cooldown active until \(cooldownUntil), skipping update check")
-            throw LingoHubSDKError.apiError(statusCode: 429, message: "Usage limit reached. Update checks are paused until \(cooldownUntil).", errorCodes: ["USAGE_LIMIT_EXCEEDED"])
+        return CycleContext(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion, environment: environment)
+    }
+
+    /// The configuration an update cycle runs with, captured when it starts. Every
+    /// request of the cycle, the install and the schedule use it; the cycle stops as soon
+    /// as it finds that the app changed `environment` or called `configure` with another
+    /// CDN key or app version (see `CycleSuperseded`).
+    private struct CycleContext {
+        let apiKey: String
+        let appVersion: String
+        let sdkVersion: String
+        let environment: Environment
+
+        var scope: UpdateSchedule.Scope {
+            return UpdateSchedule.Scope(appVersion: appVersion, environment: environment, apiKey: apiKey)
+        }
+    }
+
+    /// Thrown by a cycle that finds its configuration replaced after one of its waits. It
+    /// stops without changes: no further request, no install, no schedule update, and
+    /// its outcome is void.
+    private struct CycleSuperseded: Error {}
+
+    /// Whether `context` is still the SDK's configuration.
+    private func isCurrent(_ context: CycleContext) -> Bool {
+        guard let apiKey, let appVersion else { return false }
+        return context.scope == UpdateSchedule.Scope(appVersion: appVersion, environment: environment, apiKey: apiKey)
+    }
+
+    private func ensureCurrent(_ context: CycleContext) throws {
+        guard isCurrent(context) else { throw CycleSuperseded() }
+    }
+
+    /// Checks for a release, downloads and installs it. A download the storage refuses
+    /// (an expired URL, a 5xx) gets one fresh check for a new URL; every other failure
+    /// ends the cycle, and the next `update()` call is the retry.
+    ///
+    /// After each of its waits the cycle makes sure its configuration is still the SDK's:
+    /// a release for a configuration the app has left must never replace the active one.
+    private func runUpdateCycle(_ context: CycleContext, schedule: inout UpdateSchedule) async throws -> Bool {
+        guard var release = try await check(context, schedule: &schedule, retryingServerErrors: true) else {
+            return false
         }
 
-        LingoHubLogger.shared.log("Checking for updates (release: \(distributionVersion ?? "none"), environment: \(environment))")
+        let archiveURL: URL
+        do {
+            try ensureCurrent(context)
+            archiveURL = try await download(release)
+        } catch APIError.apiError(let statusCode, _, _, _) where statusCode > 0 {
+            LingoHubLogger.shared.log("Download failed with HTTP \(statusCode), checking again for a fresh download URL")
+            try ensureCurrent(context)
+            guard let freshRelease = try await check(context, schedule: &schedule, retryingServerErrors: false) else {
+                return false
+            }
+            release = freshRelease
+            try ensureCurrent(context)
+            archiveURL = try await download(release)
+        }
+        defer { try? FileManager.default.removeItem(at: archiveURL) }
+
+        try await installArchive(at: archiveURL, identifier: release.id, appVersion: context.appVersion, expectedSha256: release.filesSha256) {
+            self.isCurrent(context)
+        }
+        return true
+    }
+
+    /// Sends one check request and applies the policy to the answer. Returns the release
+    /// to install, or nil when there is nothing new. A 5xx is retried once when
+    /// `retryingServerErrors`; a 5xx that persists, or a 429, pauses update checks.
+    private func check(_ context: CycleContext, schedule: inout UpdateSchedule, retryingServerErrors: Bool) async throws -> BundleInfo? {
+        LingoHubLogger.shared.log("Checking for updates (release: \(distributionVersion ?? "none"), environment: \(context.environment))")
 
         do {
-            let bundleInfo = try await apiClient.checkForUpdates(
-                apiKey: apiKey,
-                appVersion: appVersion,
-                sdkVersion: sdkVersion,
+            let release = try await apiClient.checkForUpdates(
+                apiKey: context.apiKey,
+                appVersion: context.appVersion,
+                sdkVersion: context.sdkVersion,
                 distributionVersion: distributionVersion,
-                environment: environment,
+                environment: context.environment,
                 deviceIdentifier: deviceIdentifier,
                 languageCode: effectiveLanguageCode
             )
-
-            // The CDN is HTTPS-only; a non-HTTPS download URL in the metadata means
-            // something between the SDK and the CDN is broken or hostile.
-            guard bundleInfo.filesUrl.scheme?.lowercased() == "https" else {
-                LingoHubLogger.shared.log("Rejecting non-HTTPS download URL")
-                throw LingoHubSDKError.apiError(statusCode: 0, message: "Insecure download URL rejected", errorCodes: [])
-            }
-
-            let archiveURL = try await apiClient.download(from: bundleInfo.filesUrl, maxSize: installer.limits.maxCompressedSize)
-            defer { try? FileManager.default.removeItem(at: archiveURL) }
-
-            try await installArchive(at: archiveURL, identifier: bundleInfo.id, appVersion: appVersion, expectedSha256: bundleInfo.filesSha256)
-            return true
+            schedule.recordAnswer()
+            return release
         } catch APIError.noContent {
+            schedule.recordAnswer()
             LingoHubLogger.shared.log("No content available for update")
-            return false
-        } catch APIError.apiError(404, _, let infos) where infos.contains("DISTRIBUTION_NOT_FOUND") {
-            // The CDN's DISTRIBUTION_NOT_FOUND means no release matches this app version
-            // and no fallback release exists (e.g. nothing has been published yet).
-            // That is a normal state, not an error. Any other 404 stays a failure.
-            LingoHubLogger.shared.log("No distribution release available for this app (404 DISTRIBUTION_NOT_FOUND)")
-            return false
-        } catch let error as LingoHubSDKError {
-            throw error
-        } catch APIError.apiError(let statusCode, let message, let infos) {
-            LingoHubLogger.shared.log("API error: Status \(statusCode), Message: \(message ?? "No message")")
-            if statusCode == 429 {
-                // Usage budget exhausted; pause update checks client-side.
-                UserDefaults.standard.set(Date().addingTimeInterval(LingoHubConstants.usageLimitCooldownInterval).timeIntervalSince1970, forKey: LingoHubConstants.usageCooldownUntil)
+            return nil
+        } catch APIError.apiError(let statusCode, let message, let infos, let retryAfter) {
+            switch statusCode {
+            case 404 where infos.contains("DISTRIBUTION_NOT_FOUND"):
+                // The CDN's DISTRIBUTION_NOT_FOUND means no release matches this app version
+                // and no fallback release exists (e.g. nothing has been published yet).
+                // That is a normal state, not an error. Any other 404 stays a failure.
+                schedule.recordAnswer()
+                LingoHubLogger.shared.log("No distribution release available for this app (404 DISTRIBUTION_NOT_FOUND)")
+                return nil
+            case 429:
+                schedule.recordUsageLimit(errorCodes: infos, retryAfter: retryAfter, at: now)
+            case 500...599:
+                if retryingServerErrors, let delay = UpdatePolicy.serverErrorRetryDelay(retryAfter: retryAfter) {
+                    LingoHubLogger.shared.log("Server error (HTTP \(statusCode)), retrying once in \(String(format: "%.1f", delay)) s")
+                    try await waitBeforeRetry(delay)
+                    try ensureCurrent(context)
+                    return try await check(context, schedule: &schedule, retryingServerErrors: false)
+                }
+                schedule.recordServerError(statusCode: statusCode, errorCodes: infos, retryAfter: retryAfter, at: now)
+            case 1...:
+                // No retry: the next update() call checks again
+                schedule.recordAnswer()
+            default:
+                // Status 0: a local failure, the CDN did not answer
+                break
             }
-            throw LingoHubSDKError.apiError(statusCode: statusCode, message: message, errorCodes: infos)
-        } catch let error as DecodingError {
+            throw APIError.apiError(statusCode: statusCode, message: message, infos: infos, retryAfter: retryAfter)
+        }
+    }
+
+    /// Downloads a release archive. The caller deletes the returned file.
+    private func download(_ release: BundleInfo) async throws -> URL {
+        // The CDN is HTTPS-only; a non-HTTPS download URL in the metadata means
+        // something between the SDK and the CDN is broken or hostile.
+        guard release.filesUrl.scheme?.lowercased() == "https" else {
+            LingoHubLogger.shared.log("Rejecting non-HTTPS download URL")
+            throw LingoHubSDKError.apiError(statusCode: 0, message: "Insecure download URL rejected", errorCodes: [])
+        }
+        return try await apiClient.download(from: release.filesUrl, maxSize: installer.limits.maxCompressedSize)
+    }
+
+    /// The time update checks are paced by.
+    private var now: Date {
+        return clockOverride?() ?? Date()
+    }
+
+    private func waitBeforeRetry(_ delay: TimeInterval) async throws {
+        if let retryWaitOverride {
+            try await retryWaitOverride(delay)
+        } else {
+            try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+        }
+    }
+
+    /// The `LingoHubSDKError` reported for a failed update cycle.
+    private func sdkError(for error: Error) -> LingoHubSDKError {
+        switch error {
+        case let error as LingoHubSDKError:
+            return error
+        case APIError.apiError(let statusCode, let message, let infos, _):
+            logAPIError(statusCode: statusCode, message: message, infos: infos)
+            return .apiError(statusCode: statusCode, message: message, errorCodes: infos)
+        case let error as DecodingError:
             let errorMessage = formatDecodingError(error)
             LingoHubLogger.shared.log("Decoding error: \(errorMessage)")
-            throw LingoHubSDKError.apiError(statusCode: 0, message: errorMessage, errorCodes: [])
-        } catch let error as URLError {
+            return .apiError(statusCode: 0, message: errorMessage, errorCodes: [])
+        case let error as URLError:
             // Transport failure before any response was received (offline, DNS, timeout):
             // statusCode 0 per the documented apiError contract.
             LingoHubLogger.shared.log("Network error: \(error.localizedDescription)")
-            throw LingoHubSDKError.apiError(statusCode: 0, message: error.localizedDescription, errorCodes: [])
-        } catch APIError.invalidURL {
+            return .apiError(statusCode: 0, message: error.localizedDescription, errorCodes: [])
+        case APIError.invalidURL:
             LingoHubLogger.shared.log("Invalid request URL")
-            throw LingoHubSDKError.apiError(statusCode: 0, message: "Invalid request URL", errorCodes: [])
-        } catch APIError.invalidResponse {
+            return .apiError(statusCode: 0, message: "Invalid request URL", errorCodes: [])
+        case APIError.invalidResponse:
             LingoHubLogger.shared.log("Invalid response from the server")
-            throw LingoHubSDKError.apiError(statusCode: 0, message: "Invalid response from the server", errorCodes: [])
-        } catch {
+            return .apiError(statusCode: 0, message: "Invalid response from the server", errorCodes: [])
+        default:
             LingoHubLogger.shared.log("Unexpected error: \(error)")
-            throw LingoHubSDKError.unknown
+            return .unknown
         }
+    }
+
+    /// A client error (400, 401, a 404 other than DISTRIBUTION_NOT_FOUND, …) comes back
+    /// on every check until the app or its configuration changes, so each one is logged
+    /// once per process.
+    private func logAPIError(statusCode: Int, message: String?, infos: [String]) {
+        if (400...499).contains(statusCode), statusCode != 429 {
+            let signature = "\(statusCode) \(infos.joined(separator: ","))"
+            guard loggedClientErrors.insert(signature).inserted else { return }
+        }
+        LingoHubLogger.shared.log("API error: Status \(statusCode), Message: \(message ?? "No message")")
     }
 
     /// Installs a downloaded release archive and publishes it:
@@ -407,7 +598,12 @@ extension LingoHubSDK {
     /// lookups and `Bundle.lingohub` alike. The replaced release stays on disk until the
     /// next launch: lookups that resolved it before the swap still read from it, and it
     /// remains the fallback should the new release's metadata not reach disk.
-    func installArchive(at archiveURL: URL, identifier: String, appVersion: String, expectedSha256: String? = nil) async throws {
+    ///
+    /// `isStillWanted` is asked right before the activation, after the last suspension
+    /// point, so nothing can change its answer before the new release is live. An update
+    /// cycle passes whether its configuration is still the SDK's; when it isn't, the staged
+    /// release is removed and `CycleSuperseded` thrown.
+    func installArchive(at archiveURL: URL, identifier: String, appVersion: String, expectedSha256: String? = nil, isStillWanted: () -> Bool = { true }) async throws {
         // Let launch-time merged-bundle work finish first, so installs and merged-bundle
         // work run strictly in order.
         await pendingMergedBundleWork?.value
@@ -435,6 +631,12 @@ extension LingoHubSDK {
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Failed to install bundle: \(error.localizedDescription)", errorCodes: [])
         }
         let mergedBundle = installed.mergedBundle
+
+        guard isStillWanted() else {
+            // The merged bundle built for it is never activated; the next launch removes it
+            await installer.removeRelease(at: releaseURL)
+            throw CycleSuperseded()
+        }
 
         // Downloaded translations are re-downloadable, keep them out of device backups
         cacheManager.excludeFromBackup(folderURL)
@@ -566,16 +768,9 @@ extension LingoHubSDK {
         return language ?? Locale.lingohubLanguageCode
     }
 
-    /// The point in time until which update checks are paused after a 429 response.
-    var usageLimitCooldownUntil: Date? {
-        let timestamp = UserDefaults.standard.double(forKey: LingoHubConstants.usageCooldownUntil)
-        guard timestamp > 0 else { return nil }
-        return Date(timeIntervalSince1970: timestamp)
-    }
-
     func cleanUp() {
         cacheManager.clearPersistedRelease()
-        UserDefaults.standard.removeObject(forKey: LingoHubConstants.usageCooldownUntil)
+        UpdateSchedule.remove()
 
         cacheManager.deactivate()
 

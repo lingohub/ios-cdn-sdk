@@ -33,6 +33,7 @@ enum APIError: Error {
     case invalidURL
     case invalidResponse
     /// `infos` carries the structured RFC 7807 error codes (e.g. DISTRIBUTION_NOT_FOUND)
-    /// from the CDN's problem-details body, empty when the body had none.
-    case apiError(statusCode: Int, message: String?, infos: [String])
+    /// from the CDN's problem-details body, empty when the body had none. `retryAfter` is
+    /// the delay the response's `Retry-After` header asks for, in seconds.
+    case apiError(statusCode: Int, message: String?, infos: [String], retryAfter: TimeInterval? = nil)
 }

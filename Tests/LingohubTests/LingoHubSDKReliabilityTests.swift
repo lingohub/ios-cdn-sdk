@@ -454,7 +454,7 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
         do {
             _ = try await client.download(from: URL(string: "https://s3.amazon.de/update.zip")!, maxSize: 16)
             XCTFail("Expected the download to be rejected")
-        } catch APIError.apiError(let statusCode, let message, _) {
+        } catch APIError.apiError(let statusCode, let message, _, _) {
             XCTAssertEqual(statusCode, 0)
             XCTAssertEqual(message, "Download exceeded the size limit")
         }
