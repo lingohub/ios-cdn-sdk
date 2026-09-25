@@ -104,13 +104,13 @@ extension APIClient {
             LingoHubLogger.shared.log("No content response (204)")
             throw APIError.noContent
         default:
-            LingoHubLogger.shared.log("Error response (\(httpResponse.statusCode))")
+            // Logged by the SDK once it has applied the update policy, so that errors that
+            // repeat on every check are logged once per process
             var message: String?
             var infos: [String] = []
             if let errorResponse = try? JSONDecoder().decode(ErrorResponse.self, from: data) {
                 message = errorResponse.message
                 infos = errorResponse.infos
-                LingoHubLogger.shared.log("Error message: \(message ?? "nil")")
             }
             let retryAfter = RetryAfter.delay(fromHeaderValue: httpResponse.value(forHTTPHeaderField: "Retry-After"))
             throw APIError.apiError(statusCode: httpResponse.statusCode, message: message, infos: infos, retryAfter: retryAfter)

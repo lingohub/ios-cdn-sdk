@@ -32,6 +32,17 @@ private final class RecordedWaits: @unchecked Sendable {
     }
 }
 
+/// Counts the requests that reached the network layer.
+private final class RequestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _count = 0
+    var count: Int { lock.lh_withLock { _count } }
+
+    func increment() {
+        lock.lh_withLock { _count += 1 }
+    }
+}
+
 @MainActor
 final class UpdateSchedulingTests: XCTestCase {
     let sut: LingoHubSDK = LingoHubSDK.testInstance()
@@ -325,6 +336,33 @@ final class UpdateSchedulingTests: XCTestCase {
         let production = try await sut.updateAsync()
         XCTAssertFalse(production)
         XCTAssertEqual(api.checkCount, 4)
+        XCTAssertEqual(api.checkedEnvironments, [.production, .staging, .staging, .production])
+    }
+
+    func testReconfiguringDuringTheRetryWaitKeepsTheCycleOnItsConfiguration() async throws {
+        let api = script(checks: [
+            .failure(ScriptedAPIClient.httpError(503)),
+            .failure(ScriptedAPIClient.httpError(429, infos: ["USAGE_LIMIT_EXCEEDED"]))
+        ])
+        let stagingScope = UpdateSchedule.Scope(appVersion: TestConstants.appVersion, environment: .staging, apiKey: TestConstants.apiKey)
+        let stagingPauseUntil = clock.now + 60 * minute
+        let sdk = sut
+        let now = clock.now
+        sut.retryWaitOverride = { _ in
+            // The app switches to staging while the production cycle waits for its retry,
+            // and staging has a pause of its own on record
+            await MainActor.run {
+                sdk.environment = .staging
+                var staging = UpdateSchedule(scope: stagingScope)
+                staging.recordUsageLimit(errorCodes: ["USAGE_LIMIT_EXCEEDED"], retryAfter: nil, at: now)
+                staging.save()
+            }
+        }
+
+        await assertUpdateFails(statusCode: 429)
+
+        XCTAssertEqual(api.checkedEnvironments, [.production, .production], "The retry belongs to the cycle it retries")
+        XCTAssertEqual(UpdateSchedule.load(scope: stagingScope).cooldown?.until, stagingPauseUntil, "A replaced cycle must not overwrite the current schedule")
     }
 
     // MARK: - Client errors
@@ -422,5 +460,40 @@ final class UpdateSchedulingTests: XCTestCase {
         await assertUpdateFails(statusCode: 429, errorCodes: ["USAGE_LIMIT_EXCEEDED"])
 
         XCTAssertEqual(schedule.cooldown?.until, start + 2 * 60 * minute)
+    }
+
+    /// Answers every check request through the real `APIClient`'s URL session and counts
+    /// the requests that reach the network layer, retries by the HTTP stack included.
+    private func mockCheckEndpoint(statusCode: Int, body: String) -> RequestCounter {
+        _ = LingoHubSDK.testInstance() // the Mocker-backed API client
+        let requests = RequestCounter()
+        var mock = Mock(
+            url: URL(string: LingoHubConstants.basePath + "v1/distributions/check")!,
+            ignoreQuery: true,
+            contentType: .json,
+            statusCode: statusCode,
+            data: [.post: Data(body.utf8)]
+        )
+        mock.onRequestHandler = OnRequestHandler(callback: { requests.increment() })
+        mock.register()
+        return requests
+    }
+
+    func testServerErrorSendsTheRequestAndOneRetryOverTheWire() async throws {
+        let requests = mockCheckEndpoint(statusCode: 503, body: #"{"status": 503, "detail": "Service Unavailable", "errors": []}"#)
+
+        await assertUpdateFails(statusCode: 503)
+        XCTAssertEqual(requests.count, 2)
+
+        await assertUpdateFails(statusCode: 503)
+        XCTAssertEqual(requests.count, 2, "Paused: no request")
+    }
+
+    func testClientErrorSendsOneRequestOverTheWire() async throws {
+        let requests = mockCheckEndpoint(statusCode: 401, body: #"{"status": 401, "detail": "Unauthorized", "errors": [{"field": "AUTHORIZATION", "infos": ["CDN_KEY_NOT_FOUND"]}]}"#)
+
+        await assertUpdateFails(statusCode: 401, errorCodes: ["CDN_KEY_NOT_FOUND"])
+
+        XCTAssertEqual(requests.count, 1)
     }
 }

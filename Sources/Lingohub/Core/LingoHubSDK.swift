@@ -362,7 +362,8 @@ extension LingoHubSDK {
             throw LingoHubSDKError.invalidApiKey
         }
 
-        var schedule = UpdateSchedule.load(scope: UpdateSchedule.Scope(appVersion: appVersion, environment: environment, apiKey: apiKey))
+        let context = CycleContext(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion, environment: environment)
+        var schedule = UpdateSchedule.load(scope: context.scope)
         switch schedule.decision(at: now, minimumInterval: minimumCheckInterval) {
         case .paused(let cooldown):
             LingoHubLogger.shared.log("Update checks are paused until \(cooldown.until) after HTTP \(cooldown.statusCode), skipping the check")
@@ -374,31 +375,49 @@ extension LingoHubSDK {
             break
         }
 
-        let request = CheckRequest(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion)
         do {
-            let updated = try await runUpdateCycle(request, schedule: &schedule)
+            let updated = try await runUpdateCycle(context, schedule: &schedule)
             schedule.recordSuccess(at: now)
-            schedule.save()
+            persist(schedule, of: context)
             return updated
         } catch {
             // Keeps what the cycle recorded: a pause, or the end of a series of 5xx
-            schedule.save()
+            persist(schedule, of: context)
             throw sdkError(for: error)
         }
     }
 
-    /// The validated inputs of the check requests in one update cycle.
-    private struct CheckRequest {
+    /// The configuration an update cycle runs with, captured when it starts. Every
+    /// request of the cycle, the install and the schedule use it, even if the app changes
+    /// `environment` or calls `configure` again while the cycle waits for its retry.
+    private struct CycleContext {
         let apiKey: String
         let appVersion: String
         let sdkVersion: String
+        let environment: Environment
+
+        var scope: UpdateSchedule.Scope {
+            return UpdateSchedule.Scope(appVersion: appVersion, environment: environment, apiKey: apiKey)
+        }
+    }
+
+    /// Saves what a cycle recorded, unless the app reconfigured the SDK while it ran: the
+    /// schedule then belongs to a scope no longer in use, and saving it would replace the
+    /// current scope's schedule.
+    private func persist(_ schedule: UpdateSchedule, of context: CycleContext) {
+        guard let apiKey, let appVersion,
+              context.scope == UpdateSchedule.Scope(appVersion: appVersion, environment: environment, apiKey: apiKey) else {
+            LingoHubLogger.shared.log("The SDK was reconfigured during the update check; its schedule is not saved")
+            return
+        }
+        schedule.save()
     }
 
     /// Checks for a release, downloads and installs it. A download the storage refuses
     /// (an expired URL, a 5xx) gets one fresh check for a new URL; every other failure
     /// ends the cycle, and the next `update()` call is the retry.
-    private func runUpdateCycle(_ request: CheckRequest, schedule: inout UpdateSchedule) async throws -> Bool {
-        guard var release = try await check(request, schedule: &schedule, retryingServerErrors: true) else {
+    private func runUpdateCycle(_ context: CycleContext, schedule: inout UpdateSchedule) async throws -> Bool {
+        guard var release = try await check(context, schedule: &schedule, retryingServerErrors: true) else {
             return false
         }
 
@@ -407,7 +426,7 @@ extension LingoHubSDK {
             archiveURL = try await download(release)
         } catch APIError.apiError(let statusCode, _, _, _) where statusCode > 0 {
             LingoHubLogger.shared.log("Download failed with HTTP \(statusCode), checking again for a fresh download URL")
-            guard let freshRelease = try await check(request, schedule: &schedule, retryingServerErrors: false) else {
+            guard let freshRelease = try await check(context, schedule: &schedule, retryingServerErrors: false) else {
                 return false
             }
             release = freshRelease
@@ -415,23 +434,23 @@ extension LingoHubSDK {
         }
         defer { try? FileManager.default.removeItem(at: archiveURL) }
 
-        try await installArchive(at: archiveURL, identifier: release.id, appVersion: request.appVersion, expectedSha256: release.filesSha256)
+        try await installArchive(at: archiveURL, identifier: release.id, appVersion: context.appVersion, expectedSha256: release.filesSha256)
         return true
     }
 
     /// Sends one check request and applies the policy to the answer. Returns the release
     /// to install, or nil when there is nothing new. A 5xx is retried once when
     /// `retryingServerErrors`; a 5xx that persists, or a 429, pauses update checks.
-    private func check(_ request: CheckRequest, schedule: inout UpdateSchedule, retryingServerErrors: Bool) async throws -> BundleInfo? {
-        LingoHubLogger.shared.log("Checking for updates (release: \(distributionVersion ?? "none"), environment: \(environment))")
+    private func check(_ context: CycleContext, schedule: inout UpdateSchedule, retryingServerErrors: Bool) async throws -> BundleInfo? {
+        LingoHubLogger.shared.log("Checking for updates (release: \(distributionVersion ?? "none"), environment: \(context.environment))")
 
         do {
             let release = try await apiClient.checkForUpdates(
-                apiKey: request.apiKey,
-                appVersion: request.appVersion,
-                sdkVersion: request.sdkVersion,
+                apiKey: context.apiKey,
+                appVersion: context.appVersion,
+                sdkVersion: context.sdkVersion,
                 distributionVersion: distributionVersion,
-                environment: environment,
+                environment: context.environment,
                 deviceIdentifier: deviceIdentifier,
                 languageCode: effectiveLanguageCode
             )
@@ -456,9 +475,9 @@ extension LingoHubSDK {
                 if retryingServerErrors, let delay = UpdatePolicy.serverErrorRetryDelay(retryAfter: retryAfter) {
                     LingoHubLogger.shared.log("Server error (HTTP \(statusCode)), retrying once in \(String(format: "%.1f", delay)) s")
                     try await waitBeforeRetry(delay)
-                    return try await check(request, schedule: &schedule, retryingServerErrors: false)
+                    return try await check(context, schedule: &schedule, retryingServerErrors: false)
                 }
-                schedule.recordServerError(statusCode: statusCode, retryAfter: retryAfter, at: now)
+                schedule.recordServerError(statusCode: statusCode, errorCodes: infos, retryAfter: retryAfter, at: now)
             case 1...:
                 // No retry: the next update() call checks again
                 schedule.recordAnswer()

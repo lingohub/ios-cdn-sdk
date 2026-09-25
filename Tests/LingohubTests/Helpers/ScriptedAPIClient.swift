@@ -16,10 +16,12 @@ final class ScriptedAPIClient: APIClientProtocol, @unchecked Sendable {
     private let lock = NSLock()
     private var checkAnswers: [CheckAnswer]
     private var downloadAnswers: [DownloadAnswer]
-    private var _checkCount = 0
+    private var _checkedEnvironments: [Environment] = []
     private var _downloadedURLs: [URL] = []
 
-    var checkCount: Int { lock.lh_withLock { _checkCount } }
+    var checkCount: Int { lock.lh_withLock { _checkedEnvironments.count } }
+    /// The environment of every check request, in order.
+    var checkedEnvironments: [Environment] { lock.lh_withLock { _checkedEnvironments } }
     var downloadedURLs: [URL] { lock.lh_withLock { _downloadedURLs } }
 
     init(checks: [CheckAnswer], downloads: [DownloadAnswer] = []) {
@@ -29,7 +31,7 @@ final class ScriptedAPIClient: APIClientProtocol, @unchecked Sendable {
 
     func checkForUpdates(apiKey: String, appVersion: String, sdkVersion: String, distributionVersion: String?, environment: Environment, deviceIdentifier: String?, languageCode: String?) async throws -> BundleInfo {
         let answer: CheckAnswer = lock.lh_withLock {
-            _checkCount += 1
+            _checkedEnvironments.append(environment)
             return checkAnswers.isEmpty ? .failure(ScriptExhausted()) : checkAnswers.removeFirst()
         }
         return try answer.get()

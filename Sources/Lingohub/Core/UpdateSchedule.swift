@@ -89,10 +89,10 @@ extension UpdateSchedule {
     }
 
     /// An update failed with a 5xx: pause checks, backing off with every failure in a row.
-    mutating func recordServerError(statusCode: Int, retryAfter: TimeInterval?, at now: Date) {
+    mutating func recordServerError(statusCode: Int, errorCodes: [String], retryAfter: TimeInterval?, at now: Date) {
         consecutiveServerErrors += 1
         let duration = UpdatePolicy.serverErrorCooldown(consecutiveFailures: consecutiveServerErrors, retryAfter: retryAfter)
-        cooldown = Cooldown(until: now.addingTimeInterval(duration), statusCode: statusCode, errorCodes: [])
+        cooldown = Cooldown(until: now.addingTimeInterval(duration), statusCode: statusCode, errorCodes: errorCodes)
     }
 
     /// The CDN answered 429: pause checks for an hour, or for `Retry-After` when longer.

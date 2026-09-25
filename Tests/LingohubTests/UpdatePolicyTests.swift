@@ -96,19 +96,18 @@ final class UpdatePolicyTests: XCTestCase {
     func testServerErrorsPauseWithBackoffUntilTheCDNAnswersAgain() throws {
         var schedule = UpdateSchedule(scope: scope)
 
-        schedule.recordServerError(statusCode: 503, retryAfter: 2, at: start)
+        schedule.recordServerError(statusCode: 503, errorCodes: [], retryAfter: 2, at: start)
         let first = try XCTUnwrap(schedule.cooldown)
         XCTAssertEqual(first, UpdateSchedule.Cooldown(until: start + 5 * minute, statusCode: 503, errorCodes: []))
         XCTAssertEqual(schedule.decision(at: start + 5 * minute - 1, minimumInterval: 0), .paused(first))
         XCTAssertEqual(schedule.decision(at: start + 5 * minute, minimumInterval: 0), .check)
 
-        schedule.recordServerError(statusCode: 502, retryAfter: nil, at: start + 5 * minute)
-        XCTAssertEqual(schedule.cooldown?.until, start + 15 * minute)
-        XCTAssertEqual(schedule.cooldown?.statusCode, 502)
+        schedule.recordServerError(statusCode: 502, errorCodes: ["UPSTREAM_DOWN"], retryAfter: nil, at: start + 5 * minute)
+        XCTAssertEqual(schedule.cooldown, UpdateSchedule.Cooldown(until: start + 15 * minute, statusCode: 502, errorCodes: ["UPSTREAM_DOWN"]), "The pause keeps the codes it reports")
 
         // Any answer but a 5xx ends the series
         schedule.recordAnswer()
-        schedule.recordServerError(statusCode: 503, retryAfter: nil, at: start + hour)
+        schedule.recordServerError(statusCode: 503, errorCodes: [], retryAfter: nil, at: start + hour)
         XCTAssertEqual(schedule.cooldown?.until, start + hour + 5 * minute)
 
         schedule.recordSuccess(at: start + 2 * hour)
@@ -119,7 +118,7 @@ final class UpdatePolicyTests: XCTestCase {
 
     func testUsageLimitPausesChecksAndEndsAServerErrorSeries() {
         var schedule = UpdateSchedule(scope: scope)
-        schedule.recordServerError(statusCode: 503, retryAfter: nil, at: start)
+        schedule.recordServerError(statusCode: 503, errorCodes: [], retryAfter: nil, at: start)
 
         schedule.recordUsageLimit(errorCodes: ["USAGE_LIMIT_EXCEEDED"], retryAfter: 3 * hour, at: start)
 
@@ -145,7 +144,7 @@ final class UpdatePolicyTests: XCTestCase {
 
     func testScheduleSurvivesARelaunchForTheSameScopeOnly() {
         var schedule = UpdateSchedule(scope: scope)
-        schedule.recordServerError(statusCode: 503, retryAfter: nil, at: start)
+        schedule.recordServerError(statusCode: 503, errorCodes: [], retryAfter: nil, at: start)
         schedule.recordUsageLimit(errorCodes: ["USAGE_LIMIT_EXCEEDED"], retryAfter: nil, at: start)
         schedule.save()
 
