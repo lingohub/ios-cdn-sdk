@@ -15,9 +15,9 @@ jobs:
       - name: Build
         run: swift build
       # SDK sources must be completely free of strict-concurrency diagnostics —
-      # these are the warnings that become errors in the Swift 6 language mode,
-      # so this step is what keeps the project itself Swift-6-ready while the
-      # swift6-mode job below only tracks the ZIPFoundation dependency.
+      # these are the warnings that become errors in the Swift 6 language mode.
+      # This step fails on any SDK warning; the swift6-mode job below compiles
+      # the SDK sources in that mode and fails on its errors.
       - name: Build (strict concurrency, no SDK warnings)
         run: |
           set -o pipefail
@@ -66,15 +66,39 @@ jobs:
           swift package diagnose-api-breaking-changes "$BASE"
 
   swift6-mode:
-    name: Swift 6 language mode (tracking)
+    name: Swift 6 language mode (SDK sources)
     runs-on: macos-15
-    # ZIPFoundation 0.9.x contains concurrency-unsafe mutable globals that fail
-    # under the Swift 6 language mode; the build stops there before SDK sources
-    # are even reached. This job tracks when the dependency becomes Swift-6-clean
-    # and never blocks a merge. SDK sources themselves are held to zero
-    # strict-concurrency warnings by the blocking step in test-macos above.
-    continue-on-error: true
+    # Compiles the SDK's own sources in the Swift 6 language mode, while the
+    # dependencies keep the mode their manifests declare, as in apps that use
+    # the SDK. `swift build -Xswiftc -swift-version -Xswiftc 6` would apply
+    # Swift 6 to every module and stop in ZIPFoundation 0.9.x (Swift 5 mode,
+    # mutable globals) before reaching any SDK source.
     steps:
       - uses: actions/checkout@v4
-      - name: Build in Swift 6 mode
-        run: swift build -Xswiftc -swift-version -Xswiftc 6
+      - name: Build
+        run: swift build
+      - name: Compile SDK sources in Swift 6 mode
+        run: |
+          set -o pipefail
+          # Where the module lands in .build depends on SwiftPM's build system
+          # (native on this runner, swiftbuild on newer toolchains).
+          ZIP_MODULE=$(find .build -name ZIPFoundation.swiftmodule -print -quit)
+          if [ -z "$ZIP_MODULE" ]; then
+            echo "::error::ZIPFoundation.swiftmodule not found in .build"
+            exit 1
+          fi
+          # -emit-sil rather than -typecheck: data-race errors from region-based
+          # isolation are diagnosed in SIL, after type checking. -wmo makes it a
+          # single compile job, whose one output is discarded. macOS 12 is the
+          # package's minimum platform.
+          status=0
+          xcrun swiftc -emit-sil -wmo -o /dev/null -swift-version 6 \
+            -sdk "$(xcrun --sdk macosx --show-sdk-path)" \
+            -target "$(uname -m)-apple-macos12.0" \
+            -I "$(dirname "$ZIP_MODULE")" \
+            -module-name Lingohub -parse-as-library \
+            $(find Sources/Lingohub -name '*.swift') 2>&1 | tee swift6.log || status=$?
+          if [ "$status" -ne 0 ] || grep -q "error:" swift6.log; then
+            echo "::error::SDK sources do not compile in the Swift 6 language mode"
+            exit 1
+          fi
