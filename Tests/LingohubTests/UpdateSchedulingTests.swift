@@ -81,7 +81,7 @@ final class UpdateSchedulingTests: XCTestCase {
     }
 
     private var schedule: UpdateSchedule {
-        return UpdateSchedule.load(appVersion: TestConstants.appVersion)
+        return sut.storedUpdateSchedule
     }
 
     /// Simulates the next app launch: nothing survives but what is on disk.
@@ -295,6 +295,35 @@ final class UpdateSchedulingTests: XCTestCase {
 
         XCTAssertFalse(updated)
         XCTAssertEqual(api.checkCount, 2)
+    }
+
+    func testAnotherEnvironmentOrCDNKeyChecksDespiteTheIntervalAndAPause() async throws {
+        let api = script(checks: [
+            ScriptedAPIClient.noContent,
+            .failure(ScriptedAPIClient.httpError(429, infos: ["USAGE_LIMIT_EXCEEDED"])),
+            ScriptedAPIClient.noContent,
+            ScriptedAPIClient.noContent
+        ])
+
+        // A successful production check starts the minimum interval
+        _ = try await sut.updateAsync()
+
+        // Staging is checked all the same, and its 429 pauses staging
+        sut.environment = .staging
+        await assertUpdateFails(statusCode: 429)
+        XCTAssertEqual(api.checkCount, 2)
+
+        // Another CDN key is checked despite that pause
+        sut.configure(withApiKey: "lh-cdn_another-key", appVersion: TestConstants.appVersion, environment: .staging)
+        let anotherKey = try await sut.updateAsync()
+        XCTAssertFalse(anotherKey)
+        XCTAssertEqual(api.checkCount, 3)
+
+        // As is the next environment switch, while the interval of the last one runs
+        sut.environment = .production
+        let production = try await sut.updateAsync()
+        XCTAssertFalse(production)
+        XCTAssertEqual(api.checkCount, 4)
     }
 
     // MARK: - Client errors

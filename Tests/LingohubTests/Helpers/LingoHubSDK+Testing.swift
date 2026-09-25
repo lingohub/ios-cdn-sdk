@@ -40,4 +40,9 @@ public extension LingoHubSDK {
         clockOverride = nil
         retryWaitOverride = nil
     }
+
+    /// The update schedule stored for the configured app version, environment and key.
+    var storedUpdateSchedule: UpdateSchedule {
+        return UpdateSchedule.load(scope: UpdateSchedule.Scope(appVersion: appVersion ?? "", environment: environment, apiKey: apiKey ?? ""))
+    }
 }

@@ -12,6 +12,7 @@ final class UpdatePolicyTests: XCTestCase {
     private let minute: TimeInterval = 60
     private let hour: TimeInterval = 60 * 60
     private let start = Date(timeIntervalSince1970: 1_800_000_000)
+    private let scope = UpdateSchedule.Scope(appVersion: "1.0.0", environment: .production, apiKey: "lh-cdn_key")
 
     override func tearDown() {
         UpdateSchedule.remove()
@@ -69,7 +70,7 @@ final class UpdatePolicyTests: XCTestCase {
     // MARK: - Schedule decisions
 
     func testMinimumIntervalCountsFromTheLastSuccessfulUpdate() {
-        var schedule = UpdateSchedule(appVersion: "1.0.0")
+        var schedule = UpdateSchedule(scope: scope)
         XCTAssertEqual(schedule.decision(at: start, minimumInterval: 15 * minute), .check)
 
         schedule.recordSuccess(at: start)
@@ -82,18 +83,18 @@ final class UpdatePolicyTests: XCTestCase {
     }
 
     func testClockTurnedBackDoesNotHoldUpdates() {
-        var schedule = UpdateSchedule(appVersion: "1.0.0")
+        var schedule = UpdateSchedule(scope: scope)
         schedule.recordSuccess(at: start)
         XCTAssertEqual(schedule.decision(at: start - hour, minimumInterval: 15 * minute), .check)
 
-        var paused = UpdateSchedule(appVersion: "1.0.0")
+        var paused = UpdateSchedule(scope: scope)
         paused.recordUsageLimit(errorCodes: [], retryAfter: nil, at: start)
         XCTAssertEqual(paused.decision(at: start - 2 * hour, minimumInterval: 0), .paused(paused.cooldown!), "Within the longest pause the SDK sets")
         XCTAssertEqual(paused.decision(at: start - 24 * hour, minimumInterval: 0), .check, "Further out than any pause the SDK sets")
     }
 
     func testServerErrorsPauseWithBackoffUntilTheCDNAnswersAgain() throws {
-        var schedule = UpdateSchedule(appVersion: "1.0.0")
+        var schedule = UpdateSchedule(scope: scope)
 
         schedule.recordServerError(statusCode: 503, retryAfter: 2, at: start)
         let first = try XCTUnwrap(schedule.cooldown)
@@ -117,7 +118,7 @@ final class UpdatePolicyTests: XCTestCase {
     }
 
     func testUsageLimitPausesChecksAndEndsAServerErrorSeries() {
-        var schedule = UpdateSchedule(appVersion: "1.0.0")
+        var schedule = UpdateSchedule(scope: scope)
         schedule.recordServerError(statusCode: 503, retryAfter: nil, at: start)
 
         schedule.recordUsageLimit(errorCodes: ["USAGE_LIMIT_EXCEEDED"], retryAfter: 3 * hour, at: start)
@@ -142,23 +143,39 @@ final class UpdatePolicyTests: XCTestCase {
 
     // MARK: - Persistence
 
-    func testScheduleSurvivesARelaunchForTheSameAppVersionOnly() {
-        var schedule = UpdateSchedule(appVersion: "1.0.0")
+    func testScheduleSurvivesARelaunchForTheSameScopeOnly() {
+        var schedule = UpdateSchedule(scope: scope)
         schedule.recordServerError(statusCode: 503, retryAfter: nil, at: start)
         schedule.recordUsageLimit(errorCodes: ["USAGE_LIMIT_EXCEEDED"], retryAfter: nil, at: start)
         schedule.save()
 
-        XCTAssertEqual(UpdateSchedule.load(appVersion: "1.0.0"), schedule)
-        XCTAssertEqual(UpdateSchedule.load(appVersion: "1.0.1"), UpdateSchedule(appVersion: "1.0.1"), "A new app version checks right away")
+        XCTAssertEqual(UpdateSchedule.load(scope: scope), schedule)
+
+        // Another app version, environment or CDN key checks right away
+        for other in [
+            UpdateSchedule.Scope(appVersion: "1.0.1", environment: .production, apiKey: "lh-cdn_key"),
+            UpdateSchedule.Scope(appVersion: "1.0.0", environment: .staging, apiKey: "lh-cdn_key"),
+            UpdateSchedule.Scope(appVersion: "1.0.0", environment: .production, apiKey: "lh-cdn_other")
+        ] {
+            XCTAssertEqual(UpdateSchedule.load(scope: other), UpdateSchedule(scope: other), "\(other)")
+        }
 
         UpdateSchedule.remove()
-        XCTAssertEqual(UpdateSchedule.load(appVersion: "1.0.0"), UpdateSchedule(appVersion: "1.0.0"))
+        XCTAssertEqual(UpdateSchedule.load(scope: scope), UpdateSchedule(scope: scope))
+    }
+
+    func testScopeStoresOnlyADigestOfTheCDNKey() throws {
+        UpdateSchedule(scope: scope).save()
+
+        let stored = try XCTUnwrap(UserDefaults.standard.data(forKey: LingoHubConstants.updateSchedule))
+        XCTAssertFalse(String(decoding: stored, as: UTF8.self).contains("lh-cdn_key"))
+        XCTAssertEqual(scope.apiKeyDigest.count, 64)
     }
 
     func testUnreadableScheduleStartsFresh() {
         UserDefaults.standard.set(Data("not json".utf8), forKey: LingoHubConstants.updateSchedule)
 
-        XCTAssertEqual(UpdateSchedule.load(appVersion: "1.0.0"), UpdateSchedule(appVersion: "1.0.0"))
+        XCTAssertEqual(UpdateSchedule.load(scope: scope), UpdateSchedule(scope: scope))
     }
 
     // MARK: - Retry-After

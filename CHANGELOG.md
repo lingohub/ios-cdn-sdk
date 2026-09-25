@@ -10,7 +10,7 @@ All notable changes to this project will be documented in this file.
   - A `5xx` from the CDN is retried once, after the delay the response's `Retry-After` asks for, or after a random 2–5 seconds. When the retry fails as well, update checks pause for 5 minutes, doubling with each further failed update in a row up to an hour. Previously every `update()` call went to the CDN.
   - After a `429`, update checks pause for an hour as before, or for longer when the CDN's `Retry-After` asks for it.
   - A download the storage refuses (an expired download URL, a `5xx`) gets one fresh check for a new download URL.
-  - Pauses are stored on the device and survive app restarts; a new app version starts without one. While a pause lasts, `update()` reports the failure that caused it without contacting the CDN.
+  - Pauses are stored on the device and survive app restarts; a new app version, another environment or another CDN key starts without one (and without the minimum interval). While a pause lasts, `update()` reports the failure that caused it without contacting the CDN.
   - Client errors (`400`, `401`, a `404` other than `DISTRIBUTION_NOT_FOUND`) are logged once per process instead of on every check.
 
 ### Added

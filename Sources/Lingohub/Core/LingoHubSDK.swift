@@ -318,7 +318,7 @@ extension LingoHubSDK {
             throw LingoHubSDKError.invalidApiKey
         }
 
-        var schedule = UpdateSchedule.load(appVersion: appVersion)
+        var schedule = UpdateSchedule.load(scope: UpdateSchedule.Scope(appVersion: appVersion, environment: environment, apiKey: apiKey))
         switch schedule.decision(at: now, minimumInterval: minimumCheckInterval) {
         case .paused(let cooldown):
             LingoHubLogger.shared.log("Update checks are paused until \(cooldown.until) after HTTP \(cooldown.statusCode), skipping the check")

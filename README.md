@@ -343,7 +343,7 @@ The SDK paces update checks and handles failed ones on its own, with the same po
 | Download failure (expired download URL, `5xx` from storage) | One fresh check to get a new download URL, then no further attempt until the next `update()` call. |
 | Minimum interval between checks | After a successful check, `update()` doesn't contact the CDN for 15 minutes (no interval in debug builds). Configurable, see [Reduce network requests](#reduce-network-requests). |
 
-Pauses are stored on the device and survive app restarts; a new app version starts without one. No pause lasts longer than 24 hours, whatever `Retry-After` asks for.
+Pauses and the minimum interval are stored on the device and survive app restarts. A new app version, another environment, or another CDN key starts without them. No pause lasts longer than 24 hours, whatever `Retry-After` asks for.
 
 While update checks are paused, `update()` reports the failure that caused the pause, as `.apiError` with its status code and error codes, without contacting the CDN. Within the minimum interval, it reports `false`.
 

@@ -2,14 +2,33 @@
 //  UpdateSchedule.swift
 //
 
+import CryptoKit
 import Foundation
 
 /// The persisted pacing state of update checks: when the last update succeeded, and
 /// whether a failure paused checks (see `UpdatePolicy`).
 ///
 /// Stored as one UserDefaults value, so it is always written as a whole. It is valid
-/// only for the app version it was recorded for: a new app version checks right away.
+/// only for the checks it was recorded for (see `Scope`): a new app version, another
+/// environment or another CDN key checks right away.
 struct UpdateSchedule: Codable, Equatable {
+    /// The checks a schedule applies to. The CDN's answers for one app version,
+    /// environment and CDN key say nothing about another, so a change of any of them
+    /// starts a fresh schedule.
+    struct Scope: Codable, Equatable {
+        let appVersion: String
+        let environment: Environment
+        /// SHA-256 of the CDN key: enough to notice a change, and the key itself is
+        /// never stored.
+        let apiKeyDigest: String
+
+        init(appVersion: String, environment: Environment, apiKey: String) {
+            self.appVersion = appVersion
+            self.environment = environment
+            self.apiKeyDigest = SHA256.hash(data: Data(apiKey.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
+    }
+
     /// Update checks are paused until `until` after the failure described by
     /// `statusCode` and `errorCodes`.
     struct Cooldown: Codable, Equatable {
@@ -28,15 +47,15 @@ struct UpdateSchedule: Codable, Equatable {
         case paused(Cooldown)
     }
 
-    let appVersion: String
+    let scope: Scope
     /// When the last update succeeded; the minimum interval counts from here.
     private(set) var lastSuccessfulUpdate: Date?
     /// Updates in a row that failed with a 5xx; the cooldown doubles with each.
     private(set) var consecutiveServerErrors = 0
     private(set) var cooldown: Cooldown?
 
-    init(appVersion: String) {
-        self.appVersion = appVersion
+    init(scope: Scope) {
+        self.scope = scope
     }
 }
 
@@ -97,12 +116,12 @@ extension UpdateSchedule.Cooldown {
 // MARK: Persistence
 
 extension UpdateSchedule {
-    /// The schedule stored for `appVersion`, or a fresh one when none is stored for it.
-    static func load(appVersion: String, from defaults: UserDefaults = .standard) -> UpdateSchedule {
+    /// The schedule stored for `scope`, or a fresh one when none is stored for it.
+    static func load(scope: Scope, from defaults: UserDefaults = .standard) -> UpdateSchedule {
         guard let data = defaults.data(forKey: LingoHubConstants.updateSchedule),
               let schedule = try? JSONDecoder().decode(UpdateSchedule.self, from: data),
-              schedule.appVersion == appVersion else {
-            return UpdateSchedule(appVersion: appVersion)
+              schedule.scope == scope else {
+            return UpdateSchedule(scope: scope)
         }
         return schedule
     }
