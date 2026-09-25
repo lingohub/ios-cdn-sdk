@@ -29,20 +29,26 @@ final class ScriptedAPIClient: APIClientProtocol, @unchecked Sendable {
         downloadAnswers = downloads
     }
 
+    /// Run while a check or a download is in flight, for tests that change the SDK meanwhile.
+    var duringCheck: (@Sendable () async -> Void)? {
+        get { lock.lh_withLock { _duringCheck } }
+        set { lock.lh_withLock { _duringCheck = newValue } }
+    }
+    var duringDownload: (@Sendable () async -> Void)? {
+        get { lock.lh_withLock { _duringDownload } }
+        set { lock.lh_withLock { _duringDownload = newValue } }
+    }
+    private var _duringCheck: (@Sendable () async -> Void)?
+    private var _duringDownload: (@Sendable () async -> Void)?
+
     func checkForUpdates(apiKey: String, appVersion: String, sdkVersion: String, distributionVersion: String?, environment: Environment, deviceIdentifier: String?, languageCode: String?) async throws -> BundleInfo {
         let answer: CheckAnswer = lock.lh_withLock {
             _checkedEnvironments.append(environment)
             return checkAnswers.isEmpty ? .failure(ScriptExhausted()) : checkAnswers.removeFirst()
         }
+        await duringCheck?()
         return try answer.get()
     }
-
-    /// Runs while a download is in flight, for tests that change the SDK meanwhile.
-    var duringDownload: (@Sendable () async -> Void)? {
-        get { lock.lh_withLock { _duringDownload } }
-        set { lock.lh_withLock { _duringDownload = newValue } }
-    }
-    private var _duringDownload: (@Sendable () async -> Void)?
 
     func download(from url: URL, maxSize: Int64?) async throws -> URL {
         let answer: DownloadAnswer = lock.lh_withLock {

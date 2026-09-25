@@ -343,10 +343,56 @@ public extension Notification.Name {
 // MARK: Update Cycle
 
 extension LingoHubSDK {
-    /// Runs one complete update cycle — check → download → verify → install → publish —
-    /// paced by the persisted `UpdateSchedule` (see `UpdatePolicy`).
+    /// Runs update cycles until one ends with the SDK's current configuration. A cycle
+    /// that finds the SDK reconfigured stops without changes, and a new cycle runs with
+    /// the new configuration: callers waiting for the update get the result of that one.
     /// Throws `LingoHubSDKError` exclusively.
     private func performUpdate() async throws -> Bool {
+        while true {
+            let context = try currentCycleContext()
+            do {
+                return try await performUpdate(with: context)
+            } catch is CycleSuperseded {
+                LingoHubLogger.shared.log("The SDK was reconfigured during the update check, checking again with the new configuration")
+            }
+        }
+    }
+
+    /// Runs one complete update cycle — check → download → verify → install → publish —
+    /// paced by the persisted `UpdateSchedule` (see `UpdatePolicy`). Throws
+    /// `CycleSuperseded` once the SDK no longer has `context`'s configuration, and
+    /// `LingoHubSDKError` otherwise.
+    private func performUpdate(with context: CycleContext) async throws -> Bool {
+        var schedule = UpdateSchedule.load(scope: context.scope)
+        switch schedule.decision(at: now, minimumInterval: minimumCheckInterval) {
+        case .paused(let cooldown):
+            LingoHubLogger.shared.log("Update checks are paused until \(cooldown.until) after HTTP \(cooldown.statusCode), skipping the check")
+            throw cooldown.error
+        case .skip(let nextCheck):
+            LingoHubLogger.shared.log("Last successful update is recent, skipping the check until \(nextCheck)")
+            return false
+        case .check:
+            break
+        }
+
+        do {
+            let updated = try await runUpdateCycle(context, schedule: &schedule)
+            // An answer that arrived after the app reconfigured the SDK is void
+            try ensureCurrent(context)
+            schedule.recordSuccess(at: now)
+            schedule.save()
+            return updated
+        } catch {
+            // So is a failure after it, and with it what the cycle recorded
+            try ensureCurrent(context)
+            // Keeps what the cycle recorded: a pause, or the end of a series of 5xx
+            schedule.save()
+            throw sdkError(for: error)
+        }
+    }
+
+    /// The SDK's configuration, for a new update cycle.
+    private func currentCycleContext() throws -> CycleContext {
         guard let sdkVersion = sdkVersion else {
             LingoHubLogger.shared.log("Error: Invalid SDK version")
             throw LingoHubSDKError.invalidSdkVersion
@@ -362,37 +408,13 @@ extension LingoHubSDK {
             throw LingoHubSDKError.invalidApiKey
         }
 
-        let context = CycleContext(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion, environment: environment)
-        var schedule = UpdateSchedule.load(scope: context.scope)
-        switch schedule.decision(at: now, minimumInterval: minimumCheckInterval) {
-        case .paused(let cooldown):
-            LingoHubLogger.shared.log("Update checks are paused until \(cooldown.until) after HTTP \(cooldown.statusCode), skipping the check")
-            throw cooldown.error
-        case .skip(let nextCheck):
-            LingoHubLogger.shared.log("Last successful update is recent, skipping the check until \(nextCheck)")
-            return false
-        case .check:
-            break
-        }
-
-        do {
-            let updated = try await runUpdateCycle(context, schedule: &schedule)
-            schedule.recordSuccess(at: now)
-            persist(schedule, of: context)
-            return updated
-        } catch is CycleSuperseded {
-            LingoHubLogger.shared.log("The SDK was reconfigured during the update check; the check stopped without changes")
-            return false
-        } catch {
-            // Keeps what the cycle recorded: a pause, or the end of a series of 5xx
-            persist(schedule, of: context)
-            throw sdkError(for: error)
-        }
+        return CycleContext(apiKey: apiKey, appVersion: appVersion, sdkVersion: sdkVersion, environment: environment)
     }
 
     /// The configuration an update cycle runs with, captured when it starts. Every
-    /// request of the cycle, the install and the schedule use it, even if the app changes
-    /// `environment` or calls `configure` again while the cycle waits for its retry.
+    /// request of the cycle, the install and the schedule use it; the cycle stops as soon
+    /// as it finds that the app changed `environment` or called `configure` with another
+    /// CDN key or app version (see `CycleSuperseded`).
     private struct CycleContext {
         let apiKey: String
         let appVersion: String
@@ -405,8 +427,8 @@ extension LingoHubSDK {
     }
 
     /// Thrown by a cycle that finds its configuration replaced after one of its waits. It
-    /// then stops without changes: no further request, no install, no schedule update. Its
-    /// callers get `false`: nothing new was installed.
+    /// stops without changes: no further request, no install, no schedule update, and
+    /// its outcome is void.
     private struct CycleSuperseded: Error {}
 
     /// Whether `context` is still the SDK's configuration.
@@ -417,17 +439,6 @@ extension LingoHubSDK {
 
     private func ensureCurrent(_ context: CycleContext) throws {
         guard isCurrent(context) else { throw CycleSuperseded() }
-    }
-
-    /// Saves what a cycle recorded, unless the app reconfigured the SDK while it ran: the
-    /// schedule then belongs to a scope no longer in use, and saving it would replace the
-    /// current scope's schedule.
-    private func persist(_ schedule: UpdateSchedule, of context: CycleContext) {
-        guard isCurrent(context) else {
-            LingoHubLogger.shared.log("The SDK was reconfigured during the update check; its schedule is not saved")
-            return
-        }
-        schedule.save()
     }
 
     /// Checks for a release, downloads and installs it. A download the storage refuses
