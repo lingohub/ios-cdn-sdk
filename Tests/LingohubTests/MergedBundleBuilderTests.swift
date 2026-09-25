@@ -398,6 +398,59 @@ final class MergedBundleBuilderTests: XCTestCase {
         XCTAssertEqual(String(format: lookup("items", in: merged, language: "de-AT", table: "Settings"), locale: german, 3), "3 Stück (AT)")
     }
 
+    func testReleaseCanChangeTheFormatOfAFallbackEntry() throws {
+        // de-AT reads apples from de. A release of de that turns the plural into a plain
+        // string (or the other way round) must replace it in de-AT too: dropping the old
+        // entry without adding the new one would leave the raw key.
+        let app = try makeApp(
+            strings: [
+                "de-AT": ["Localizable": ["welcome": "Servus"]],
+                "de": ["Settings": ["pears": "Birnen (App)"]],
+            ],
+            stringsdicts: [
+                "de": ["Localizable": ["apples": TestArchives.plural(one: "%lld Apfel (App)", other: "%lld Äpfel (App)")]],
+                "de-AT": ["Settings": ["items": TestArchives.plural(one: "%lld Stück (AT)", other: "%lld Stück (AT)")]],
+            ]
+        )
+        let german = Locale(identifier: "de")
+        try writeRelease(strings: ["de-AT": ["Localizable": ["welcome": "Servus"]]])
+        let before = try build(app.source)
+        XCTAssertEqual(String(format: lookup("apples", in: before, language: "de-AT"), locale: german, 3), "3 Äpfel (App)")
+        XCTAssertEqual(lookup("pears", in: before, language: "de-AT", table: "Settings"), "Birnen (App)")
+
+        try FileManager.default.removeItem(at: releaseURL)
+        try writeRelease(
+            strings: ["de": ["Localizable": ["apples": "Äpfel (Release)"]]],
+            stringsdicts: ["de": ["Settings": ["pears": TestArchives.plural(one: "%lld Birne (Release)", other: "%lld Birnen (Release)")]]]
+        )
+        let after = try build(app.source)
+
+        XCTAssertEqual(lookup("apples", in: after, language: "de-AT"), "Äpfel (Release)")
+        XCTAssertEqual(String(format: lookup("pears", in: after, language: "de-AT", table: "Settings"), locale: german, 3), "3 Birnen (Release)")
+        XCTAssertEqual(lookup("welcome", in: after, language: "de-AT"), "Servus")
+        XCTAssertEqual(String(format: lookup("items", in: after, language: "de-AT", table: "Settings"), locale: german, 3), "3 Stück (AT)")
+    }
+
+    func testKeysALanguageLacksComeFromTheReleaseOfItsFallback() throws {
+        // A key the app has in no file de-AT reads comes from the closest language whose
+        // release has it, and never from the development language while de-AT has the table
+        let app = try makeApp(strings: [
+            "en": ["Localizable": ["welcome": "Welcome"]],
+            "de": ["Localizable": ["welcome": "Willkommen"]],
+            "de-AT": ["Localizable": ["welcome": "Servus"]],
+        ])
+        try writeRelease(strings: [
+            "de": ["Localizable": ["goodbye": "Tschüss (Release)"]],
+            "en": ["Localizable": ["goodbye": "Goodbye (release)", "thanks": "Thanks (release)"]],
+        ])
+
+        let merged = try build(app.source)
+
+        XCTAssertEqual(lookup("goodbye", in: merged, language: "de-AT"), "Tschüss (Release)")
+        XCTAssertEqual(lookup("thanks", in: merged, language: "de-AT"), "thanks")
+        XCTAssertEqual(lookup("welcome", in: merged, language: "de-AT"), "Servus")
+    }
+
     func testDevelopmentLanguageFillsInOnlyTablesALanguageLacks() throws {
         // Foundation falls back to the development language for a table the language has
         // no file of, never for a single file of it. An English .stringsdict must not

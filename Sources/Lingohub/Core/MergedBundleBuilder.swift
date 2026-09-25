@@ -83,11 +83,12 @@ struct StringTableIndex {
 /// language has no file of at all does it fall back to the development language. The
 /// merged bundle resolves that per language up front, so every language folder is
 /// self-contained, which the single-language views that serve `setLanguage(_:)` rely
-/// on. The release's tables for the languages in that order are laid over each file, up
-/// to the language the file comes from: a table the release adds for a language cannot
-/// hide the app's fallback for the keys the release lacks, and an update of a language
-/// reaches the languages that fall back to it, but never replaces a language's own
-/// translation.
+/// on. The release's entries are then laid over it key by key: a release entry replaces
+/// the app's entry of a key, as a plain string or a plural, when it comes from a
+/// language the lookup reaches no later than the app's entry. So a table the release
+/// adds for a language cannot hide the app's fallback for the keys the release lacks,
+/// and an update of a language reaches the languages that fall back to it, but never
+/// replaces a language's own translation.
 ///
 /// The build happens in a staging directory and is published with a single rename,
 /// under a fresh name: Foundation caches bundles and their tables by path, so a path is
@@ -224,18 +225,27 @@ struct MergedBundleBuilder: Sendable {
         return Locale.components(fromIdentifier: identifier)[NSLocale.Key.languageCode.rawValue]
     }
 
-    /// One file of a table as a lookup resolves it: the app's file, and for how many
-    /// languages of the lookup's order the release's tables update it.
+    /// One file of a table as a lookup resolves it: the app's file, and how many languages
+    /// of the lookup's order come no later than it (all of them for a nonlocalized or
+    /// missing file). A release entry of one of those replaces an entry of the file.
     private struct ResolvedFile {
         var url: URL?
-        var releaseDepth: Int
+        var depth: Int
+    }
+
+    /// The entries of one release table, in both of its files.
+    private struct ReleaseEntries {
+        var strings: [String: String]
+        var stringsdict: [String: Any]
+
+        func contains(_ key: String) -> Bool {
+            return strings[key] != nil || stringsdict[key] != nil
+        }
     }
 
     /// Writes table `name` into `lprojURL` as a lookup through `order` resolves it: each
     /// file on its own, from the nonlocalized one or the first language in `order` that
-    /// has it, with the release's tables laid over it for the languages up to that one
-    /// (all of them for a nonlocalized or missing file), so a release never replaces a
-    /// more specific translation.
+    /// has it, with the release's entries laid over it key by key.
     private func writeTable(named name: String, order: [String], app: StringTableIndex, release: StringTableIndex, into lprojURL: URL) throws {
         let fileManager = FileManager.default
         let stringsURL = lprojURL.appendingPathComponent(name + ".strings")
@@ -244,16 +254,16 @@ struct MergedBundleBuilder: Sendable {
         let localized = order.map { app.languages[$0]?[name] }
         func resolve(_ file: KeyPath<StringTableIndex.Table, URL?>) -> ResolvedFile {
             if let url = app.rootTables[name]?[keyPath: file] {
-                return ResolvedFile(url: url, releaseDepth: order.count)
+                return ResolvedFile(url: url, depth: order.count)
             }
             guard let index = localized.firstIndex(where: { $0?[keyPath: file] != nil }) else {
-                return ResolvedFile(url: nil, releaseDepth: order.count)
+                return ResolvedFile(url: nil, depth: order.count)
             }
-            return ResolvedFile(url: localized[index]?[keyPath: file], releaseDepth: index + 1)
+            return ResolvedFile(url: localized[index]?[keyPath: file], depth: index + 1)
         }
         let strings = resolve(\.strings)
         let stringsdict = resolve(\.stringsdict)
-        let releaseTables = order.prefix(max(strings.releaseDepth, stringsdict.releaseDepth)).map { release.languages[$0]?[name] }
+        let releaseTables = order.map { release.languages[$0]?[name] }
 
         guard releaseTables.contains(where: { $0 != nil }) else {
             if let url = strings.url {
@@ -267,27 +277,36 @@ struct MergedBundleBuilder: Sendable {
 
         var stringsTable = try strings.url.map(readStrings) ?? [:]
         var stringsdictTable = try stringsdict.url.map(readStringsdict) ?? [:]
-        // Least specific first, so the language's own release table is laid last. Each
-        // is authoritative for every key it contains, across both files: a key it ships
-        // as a plain string must lose the plural or device variants below it (Foundation
-        // prefers the `.stringsdict` entry), and the other way round. This is also what
-        // swizzled lookups serve.
-        for (depth, releaseTable) in releaseTables.enumerated().reversed() {
-            guard let releaseTable else { continue }
-            let releaseStrings = try releaseTable.strings.map(readStrings) ?? [:]
-            let releaseStringsdict = try releaseTable.stringsdict.map(readStringsdict) ?? [:]
-            if depth < strings.releaseDepth {
-                for key in releaseStringsdict.keys {
-                    stringsTable[key] = nil
-                }
-                stringsTable.merge(releaseStrings) { _, release in release }
+        let releaseEntries = try releaseTables.map { table in
+            try table.map { ReleaseEntries(strings: try $0.strings.map(readStrings) ?? [:], stringsdict: try $0.stringsdict.map(readStringsdict) ?? [:]) }
+        }
+
+        var keys = Set(stringsTable.keys).union(stringsdictTable.keys)
+        for entries in releaseEntries.compactMap({ $0 }) {
+            keys.formUnion(entries.strings.keys)
+            keys.formUnion(entries.stringsdict.keys)
+        }
+        for key in keys {
+            // The app's entry is the one a lookup serves (Foundation prefers the
+            // `.stringsdict` entry), and the release replaces it with an entry of a language
+            // the lookup reaches no later: never a more specific translation. A key the app
+            // lacks can come from any language in the order.
+            let depth: Int
+            if stringsdictTable[key] != nil {
+                depth = stringsdict.depth
+            } else if stringsTable[key] != nil {
+                depth = strings.depth
+            } else {
+                depth = order.count
             }
-            if depth < stringsdict.releaseDepth {
-                for key in releaseStrings.keys {
-                    stringsdictTable[key] = nil
-                }
-                stringsdictTable.merge(releaseStringsdict) { _, release in release }
+            guard let replacement = releaseEntries.prefix(depth).lazy.compactMap({ $0 }).first(where: { $0.contains(key) }) else {
+                continue
             }
+            // The release entry is authoritative across both files: a key it ships as a
+            // plain string loses the app's plural or device variants, and the other way
+            // round. This is also what swizzled lookups serve.
+            stringsTable[key] = replacement.strings[key]
+            stringsdictTable[key] = replacement.stringsdict[key]
         }
 
         if !stringsTable.isEmpty {
