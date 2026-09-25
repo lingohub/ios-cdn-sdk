@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 
 ### Internal
 - Tests for every API in the README's coverage table, on macOS and the iOS simulator: `Bundle.lingohub` lookups with app-bundle fallback, plurals (including Russian categories under a language override), markdown, language switching, `LocalizedStringResource` retargeting, SwiftUI `Text` (checked by rendering), storyboards and XIBs through swizzling, launch-time reuse and rebuild, and consistency while releases are swapped.
+- CI: the Swift 6 language-mode job now compiles the SDK's own sources in that mode and is blocking. Until now it built every module in Swift 6 mode and stopped in ZIPFoundation, whose mutable globals that mode rejects, so it failed on every push without reaching a single SDK source. Dependencies now keep the language mode their manifests declare, as they do in apps.
 
 ## [2.0.0] - 2026-09-02
 
