@@ -95,7 +95,7 @@ extension MergedBundle {
 struct MergedBundleManifest: Equatable, Sendable {
     /// Bump whenever the layout or the merge rules change, so bundles written by an
     /// older SDK are rebuilt instead of reused.
-    static let currentFormatVersion = 1
+    static let currentFormatVersion = 2
 
     let formatVersion: Int
     /// The release whose entries are laid over the app's tables.
@@ -147,6 +147,10 @@ struct MergedBundleManifest: Equatable, Sendable {
 struct MergedBundleSource: Sendable {
     let resourcesURL: URL?
     let developmentRegion: String
+    /// The languages the app supports, as Foundation reports them: its `.lproj` folders,
+    /// the languages its Info.plist declares (`CFBundleLocalizations`), and the
+    /// development language.
+    let localizations: [String]
     /// `CFBundleShortVersionString (CFBundleVersion)`, part of the fingerprint.
     let version: String
 
@@ -154,16 +158,18 @@ struct MergedBundleSource: Sendable {
         let info = bundle.infoDictionary ?? [:]
         resourcesURL = bundle.resourceURL
         developmentRegion = bundle.developmentLocalization ?? "en"
+        localizations = bundle.localizations
         version = "\(info["CFBundleShortVersionString"] as? String ?? "") (\(info["CFBundleVersion"] as? String ?? ""))"
     }
 
     /// Fingerprint of the app's compiled string tables: path, size, and modification
-    /// date of every table file, plus the bundle version and development region. A new
-    /// app build that ships different tables changes it, and computing it reads no table.
+    /// date of every table file, plus the bundle version, development region, and
+    /// localizations. A new app build that ships different tables changes it, and
+    /// computing it reads no table.
     func fingerprint() -> String {
         let keys: Set<URLResourceKey> = [.fileSizeKey, .contentModificationDateKey]
         var hasher = SHA256()
-        hasher.update(data: Data("\(version)|\(developmentRegion)".utf8))
+        hasher.update(data: Data("\(version)|\(developmentRegion)|\(localizations.sorted().joined(separator: ","))".utf8))
         let files = StringTableIndex(directory: resourcesURL, includingRootTables: true, prefetching: Array(keys)).files
         for file in files.sorted(by: { $0.path < $1.path }) {
             let values = try? file.resourceValues(forKeys: keys)

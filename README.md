@@ -200,8 +200,8 @@ LocalizedStringResource("welcome_message", bundle: .atURL(Bundle.lingohub.bundle
 
 All of these keep Xcode extracting your strings into the String Catalog. How `Bundle.lingohub` behaves:
 
-* When a release is activated, the SDK writes a merged bundle next to it: every string table of your app bundle with the release's entries laid over it. Keys the release doesn't contain resolve to your bundled strings, `.stringsdict` plurals included. Each language resolves your tables the way Foundation does, including its fallback to `Base`, your development language, and nonlocalized tables.
-* A language set with `setLanguage(_:)` is served whatever locale a lookup carries. Languages that only exist in the release fall back to your development language for keys it lacks.
+* When a release is activated, the SDK writes a merged bundle next to it: every string table of your app bundle with the release's entries laid over it. Keys the release doesn't contain resolve to your bundled strings, `.stringsdict` plurals included. Each language resolves your tables the way Foundation does: nonlocalized tables, the language, the localizations Foundation falls back to for it (`de` for `de-AT`, `zh-Hant` for `zh-Hant-TW`), `Base`, and your development language. A release's update of a language also reaches the languages that fall back to it.
+* A language set with `setLanguage(_:)` is served whatever locale a lookup carries. Languages that only exist in the release fall back the same way, to your closest localization or your development language, for keys the release lacks.
 * Without an active release — before the first download, or after an app update discarded it — `Bundle.lingohub` is `Bundle.main`.
 * It covers your app bundle. Strings of frameworks or Swift packages (`bundle: .module`) keep reading their own bundle.
 * Read it where you look a string up (for example in `body`) instead of storing it: it changes when a release is activated or the language switches. Refresh visible views on [`.LingoHubDidUpdateLocalization`](#update-notifications).

@@ -32,12 +32,20 @@ final class MergedBundleBuilderTests: XCTestCase {
 
     private func makeApp(
         developmentRegion: String = "en",
+        localizations: [String]? = nil,
         strings: [String: [String: [String: String]]],
         stringsdicts: [String: [String: [String: Any]]] = [:]
     ) throws -> (bundle: Bundle, source: MergedBundleSource) {
         let url = workDir.appendingPathComponent("App-\(UUID().uuidString).app")
-        let bundle = try TestArchives.appBundle(at: url, developmentRegion: developmentRegion, strings: strings, stringsdicts: stringsdicts)
+        let bundle = try TestArchives.appBundle(at: url, developmentRegion: developmentRegion, localizations: localizations, strings: strings, stringsdicts: stringsdicts)
         return (bundle, MergedBundleSource(bundle: bundle))
+    }
+
+    /// Writes a table directly into the app's resources, outside any `.lproj`, as Xcode
+    /// ships a table that was never localized.
+    private func writeNonlocalizedTable(_ entries: [String: String], named name: String = "Localizable", into app: Bundle) throws {
+        let url = try XCTUnwrap(app.resourceURL).appendingPathComponent(name + ".strings")
+        try PropertyListSerialization.data(fromPropertyList: entries, format: .binary, options: 0).write(to: url)
     }
 
     private func writeRelease(strings: [String: [String: [String: String]]], stringsdicts: [String: [String: [String: Any]]] = [:]) throws {
@@ -46,6 +54,14 @@ final class MergedBundleBuilderTests: XCTestCase {
 
     private func build(_ source: MergedBundleSource, release: String = "release-1") throws -> MergedBundle {
         return try MergedBundleBuilder(source: source, distributionVersion: release, folder: folderURL).build(from: releaseURL)
+    }
+
+    /// Resolved by Foundation for a `LocalizedStringResource` in `locale`, against the
+    /// bundle at `bundleURL`: the lookup Swift-native APIs make.
+    @available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *)
+    private func resolve(_ key: String, table: String? = nil, locale: String, in bundleURL: URL) -> String {
+        let resource = LocalizedStringResource(String.LocalizationValue(key), table: table, locale: Locale(identifier: locale), bundle: .atURL(bundleURL))
+        return String(localized: resource)
     }
 
     private func strings(_ merged: MergedBundle, _ language: String, table: String = "Localizable") -> [String: String]? {
@@ -220,9 +236,7 @@ final class MergedBundleBuilderTests: XCTestCase {
         // Tables directly in the app's resources, outside any .lproj, win over localized
         // ones in Foundation; they are the base the release is laid over
         let app = try makeApp(strings: ["en": ["Other": ["x": "y"]]])
-        let resources = try XCTUnwrap(app.bundle.resourceURL)
-        try PropertyListSerialization.data(fromPropertyList: ["welcome": "Welcome (root)", "only_app": "Root fallback"], format: .binary, options: 0)
-            .write(to: resources.appendingPathComponent("Localizable.strings"))
+        try writeNonlocalizedTable(["welcome": "Welcome (root)", "only_app": "Root fallback"], into: app.bundle)
         try writeRelease(strings: ["en": ["Localizable": ["welcome": "Welcome (release)"]]])
 
         let merged = try build(app.source)
@@ -231,6 +245,122 @@ final class MergedBundleBuilderTests: XCTestCase {
         XCTAssertEqual(lookup("only_app", in: merged, language: "en"), "Root fallback")
         XCTAssertEqual(String(localized: "only_app", bundle: merged.bundle), "Root fallback")
         XCTAssertFalse(FileManager.default.fileExists(atPath: merged.url.appendingPathComponent("Localizable.strings").path), "A root table would hide every language's merged table")
+    }
+
+    func testNonlocalizedTablesServeEveryLanguageTheAppSupports() throws {
+        // Foundation serves a table outside any .lproj in every language, including the
+        // development language the app has no folder for. The merged bundle serves it
+        // from language folders only, so it needs one for every language the app
+        // supports, whether or not the release has it.
+        let app = try makeApp(localizations: ["en", "de"], strings: [:])
+        try writeNonlocalizedTable(["welcome": "Welcome from root"], into: app.bundle)
+        try writeRelease(strings: ["fr": ["Localizable": ["welcome": "Bonjour (release)"]]])
+
+        let merged = try build(app.source)
+
+        XCTAssertEqual(Set(merged.languageBundles.keys), ["en", "de", "fr"])
+        XCTAssertEqual(lookup("welcome", in: merged, language: "en"), "Welcome from root")
+        XCTAssertEqual(lookup("welcome", in: merged, language: "de"), "Welcome from root")
+        XCTAssertEqual(lookup("welcome", in: merged, language: "fr"), "Bonjour (release)")
+        if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) {
+            for locale in ["en", "de", "ja"] {
+                XCTAssertEqual(resolve("welcome", locale: locale, in: app.bundle.bundleURL), "Welcome from root", "App, \(locale)")
+                XCTAssertEqual(resolve("welcome", locale: locale, in: merged.bundle.bundleURL), "Welcome from root", "Merged bundle, \(locale)")
+            }
+        }
+    }
+
+    func testScriptRegionFallsBackToItsScript() throws {
+        // zh-Hant-TW falls back to zh-Hant, never to zh or the development language
+        guard #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) else {
+            throw XCTSkip("LocalizedStringResource requires iOS 16 / macOS 13")
+        }
+        let app = try makeApp(strings: [
+            "en": ["Settings": ["title": "English settings"]],
+            "zh-Hant": ["Settings": ["title": "Traditional settings"]],
+            "zh-Hant-TW": ["Localizable": ["welcome": "Taiwan welcome"]],
+        ])
+        XCTAssertEqual(resolve("title", table: "Settings", locale: "zh-Hant-TW", in: app.bundle.bundleURL), "Traditional settings")
+        try writeRelease(strings: ["zh-Hant-TW": ["Localizable": ["welcome": "Taiwan release"]]])
+
+        let merged = try build(app.source)
+
+        XCTAssertEqual(resolve("title", table: "Settings", locale: "zh-Hant-TW", in: merged.bundle.bundleURL), "Traditional settings")
+        XCTAssertEqual(lookup("title", in: merged, language: "zh-Hant-TW", table: "Settings"), "Traditional settings")
+        XCTAssertEqual(lookup("welcome", in: merged, language: "zh-Hant-TW"), "Taiwan release")
+    }
+
+    func testFallbackMatchesFoundationForEveryLanguageFamily() throws {
+        // Foundation matches a language to its script and CLDR parents, regional siblings
+        // (the first listed of equally good ones), and legacy codes (es-MX → es-419,
+        // pt-AO → pt-PT, de-AT → de-CH, he → iw), and stops at the language's own folder
+        // when the app has one. The merged bundle must resolve a table the language lacks
+        // exactly as the app does, wherever the app resolves it at all (where it returns
+        // the key, the merged bundle may fall back further).
+        guard #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) else {
+            throw XCTSkip("LocalizedStringResource requires iOS 16 / macOS 13")
+        }
+        let families: [(language: String, settings: [String: String])] = [
+            ("zh-Hant-TW", ["zh": "Generic Chinese", "zh-Hans": "Simplified", "zh-Hant": "Traditional"]),
+            ("zh-Hant-TW", ["zh-TW": "Legacy Taiwan"]),
+            ("es-MX", ["es": "Spanish", "es-419": "Latin American"]),
+            ("pt-AO", ["pt-BR": "Brazilian", "pt-PT": "European"]),
+            ("de-AT", ["de-CH": "Swiss"]),
+            ("fr-BE", ["fr-CA": "Canadian French", "fr-CH": "Swiss French"]),
+            ("he", ["iw": "Hebrew (iw)"]),
+        ]
+        var compared = 0
+        for (language, settings) in families {
+            for appHasLanguage in [false, true] {
+                var strings: [String: [String: [String: String]]] = ["en": ["Settings": ["title": "English"]]]
+                for (localization, title) in settings {
+                    strings[localization] = ["Settings": ["title": title]]
+                }
+                if appHasLanguage {
+                    strings[language] = ["Localizable": ["welcome": "Welcome (app)"]]
+                }
+                let app = try makeApp(strings: strings)
+                let release = workDir.appendingPathComponent("release-\(UUID().uuidString)")
+                try TestArchives.write(files: TestArchives.releaseFiles(strings: [language: ["Localizable": ["welcome": "Welcome (release)"]]]), to: release)
+                let merged = try MergedBundleBuilder(source: app.source, distributionVersion: "release-1", folder: folderURL).build(from: release)
+
+                let context = "\(language), \(appHasLanguage ? "with" : "without") the app's own folder"
+                let native = resolve("title", table: "Settings", locale: language, in: app.bundle.bundleURL)
+                guard native != "title" else { continue }
+                compared += 1
+                XCTAssertEqual(resolve("title", table: "Settings", locale: language, in: merged.bundle.bundleURL), native, context)
+                XCTAssertEqual(lookup("title", in: merged, language: language, table: "Settings"), native, "Language view, \(context)")
+            }
+        }
+        XCTAssertGreaterThanOrEqual(compared, families.count, "Every family resolves natively at least without its own folder")
+    }
+
+    func testReleaseUpdatesReachTheLanguagesThatFallBackToThem() throws {
+        // A table a language lacks resolves in the language it falls back to, and the
+        // release's update of that language must reach it there too. Only for languages
+        // the lookup reaches before the app's own table: an update of a fallback never
+        // replaces the language's own translation.
+        let app = try makeApp(strings: [
+            "en": ["Localizable": ["welcome": "Welcome"], "Settings": ["title": "Title", "subtitle": "Subtitle"], "Help": ["faq": "FAQ"]],
+            "de": ["Localizable": ["welcome": "Willkommen"], "Settings": ["title": "Titel", "subtitle": "Untertitel"]],
+            "de-AT": ["Localizable": ["welcome": "Servus"]],
+        ])
+        try writeRelease(strings: [
+            "de": ["Settings": ["title": "Titel (Release)"]],
+            "en": ["Settings": ["title": "Title (release)", "subtitle": "Subtitle (release)"], "Help": ["faq": "FAQ (release)"]],
+        ])
+
+        let merged = try build(app.source)
+
+        XCTAssertEqual(lookup("title", in: merged, language: "de-AT", table: "Settings"), "Titel (Release)")
+        XCTAssertEqual(lookup("faq", in: merged, language: "de", table: "Help"), "FAQ (release)")
+        XCTAssertEqual(lookup("faq", in: merged, language: "de-AT", table: "Help"), "FAQ (release)")
+        XCTAssertEqual(lookup("subtitle", in: merged, language: "de", table: "Settings"), "Untertitel")
+        XCTAssertEqual(lookup("subtitle", in: merged, language: "de-AT", table: "Settings"), "Untertitel")
+        XCTAssertEqual(lookup("welcome", in: merged, language: "de-AT"), "Servus")
+        if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) {
+            XCTAssertEqual(resolve("title", table: "Settings", locale: "de-AT", in: merged.bundle.bundleURL), "Titel (Release)")
+        }
     }
 
     func testMacOSMetadataInTheReleaseIsIgnored() throws {

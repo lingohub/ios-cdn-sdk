@@ -77,11 +77,15 @@ struct StringTableIndex {
 /// unchanged (a copy-on-write clone on APFS).
 ///
 /// Foundation resolves a table file by file, in this order: a nonlocalized file at the
-/// resources root, the language, its base language (`de` for `de-AT`), `Base`, and the
-/// development language. The merged bundle resolves that per language up front, so a
-/// table the release adds for a language cannot hide the app's fallback for the keys
-/// the release lacks, and every language folder is self-contained, which the
-/// single-language views that serve `setLanguage(_:)` rely on.
+/// resources root, the language, the localizations Foundation matches the language to
+/// (`de` for `de-AT`, `zh-Hant` for `zh-Hant-TW`, `es-419` for `es-MX`), `Base`, and the
+/// development language. The merged bundle resolves that per language up front, so
+/// every language folder is self-contained, which the single-language views that serve
+/// `setLanguage(_:)` rely on. The release's tables for the languages in that order are
+/// laid over the app's table, up to the language the app's file comes from: a table
+/// the release adds for a language cannot hide the app's fallback for the keys the
+/// release lacks, and an update of a language reaches the languages that fall back to
+/// it, but never replaces a language's own translation.
 ///
 /// The build happens in a staging directory and is published with a single rename,
 /// under a fresh name: Foundation caches bundles and their tables by path, so a path is
@@ -149,86 +153,118 @@ struct MergedBundleBuilder: Sendable {
         let app = StringTableIndex(directory: source.resourcesURL, includingRootTables: true)
         let release = StringTableIndex(directory: releaseURL)
 
-        for language in Set(app.languages.keys).union(release.languages.keys) {
-            let fallbacks = fallbackLanguages(of: language)
-            let appTables = effectiveTables(for: [language] + fallbacks, in: app)
-            let releaseTables = release.languages[language] ?? [:]
-            var tables: [String: (app: StringTableIndex.Table?, release: StringTableIndex.Table?)] = [:]
-            for name in Set(appTables.keys).union(releaseTables.keys) {
-                tables[name] = (appTables[name], releaseTables[name])
-            }
-            // A table neither the app nor this language's release has, but a fallback
-            // language's release does, resolves there for a lookup of the whole bundle
-            for fallback in fallbacks {
-                for (name, releaseTable) in release.languages[fallback] ?? [:] where tables[name] == nil {
-                    tables[name] = (nil, releaseTable)
-                }
-            }
+        var languages = Set(app.languages.keys).union(release.languages.keys)
+        if !app.rootTables.isEmpty {
+            // Foundation serves nonlocalized tables in every language, but the merged
+            // bundle serves them from language folders only: it needs a folder for every
+            // language the app supports, whether or not the release has it
+            languages.formUnion(source.localizations + [source.developmentRegion])
+        }
+        // Foundation breaks ties between equally good matches (fr-CA and fr-CH for fr-BE)
+        // by position: the app's localizations keep the order the app matches in, the
+        // others follow sorted, so every build resolves alike
+        let appLocalizations = source.localizations + Set(app.languages.keys).subtracting(source.localizations).sorted()
+        let allLocalizations = appLocalizations + languages.subtracting(appLocalizations).sorted()
 
+        for language in languages {
+            let order = searchOrder(for: language, appLocalizations: appLocalizations, allLocalizations: allLocalizations)
             let lprojURL = bundleURL.appendingPathComponent(language + ".lproj")
             try FileManager.default.createDirectory(at: lprojURL, withIntermediateDirectories: false)
-            for (name, table) in tables {
-                try writeTable(named: name, app: table.app, release: table.release, into: lprojURL)
+
+            var names = Set(app.rootTables.keys)
+            for localization in order {
+                names.formUnion(app.languages[localization, default: [:]].keys)
+                names.formUnion(release.languages[localization, default: [:]].keys)
+            }
+            for name in names {
+                // File by file: a nonlocalized file wins, then the first language that has it
+                let localized = order.map { app.languages[$0]?[name] }
+                let candidates = [app.rootTables[name]] + localized
+                let appTable = StringTableIndex.Table(
+                    strings: candidates.lazy.compactMap { $0?.strings }.first,
+                    stringsdict: candidates.lazy.compactMap { $0?.stringsdict }.first
+                )
+                // The release updates the languages the lookup reaches up to the first one
+                // with an app file; all of them when the app's table is nonlocalized or
+                // missing
+                let reached = localized.firstIndex { $0 != nil }.map { order[...$0] } ?? order[...]
+                let releaseLayers = reached.compactMap { release.languages[$0]?[name] }
+                try writeTable(named: name, app: appTable, releaseLayers: releaseLayers, into: lprojURL)
             }
         }
     }
 
-    /// The languages Foundation falls back to, in order, for a table file missing in
-    /// `language`: its base language, `Base`, and the development language.
-    private func fallbackLanguages(of language: String) -> [String] {
-        var fallbacks: [String] = []
-        if let baseLanguage = language.split(separator: "-").first.map(String.init), baseLanguage != language {
-            fallbacks.append(baseLanguage)
+    /// The languages a lookup in `language` consults, in order, for a table file the
+    /// language lacks: the language itself, the localizations Foundation matches it to
+    /// with the release's languages added and in the app on its own (a release that adds
+    /// `de-AT` must not take the app's fallback to `de-CH` away), `Base`, and the
+    /// development language.
+    private func searchOrder(for language: String, appLocalizations: [String], allLocalizations: [String]) -> [String] {
+        var order = [language]
+        if language != "Base" {
+            order += Self.localizations(matching: language, in: allLocalizations)
+            order += Self.localizations(matching: language, in: appLocalizations)
         }
-        for fallback in ["Base", source.developmentRegion] where fallback != language && !fallbacks.contains(fallback) {
-            fallbacks.append(fallback)
-        }
-        return fallbacks
+        order += ["Base", source.developmentRegion]
+        var seen = Set<String>()
+        return order.filter { seen.insert($0).inserted }
     }
 
-    /// For every app table, the file a lookup through `searchOrder` resolves, file by
-    /// file: a nonlocalized root file wins, then the first language that has it.
-    private func effectiveTables(for searchOrder: [String], in app: StringTableIndex) -> [String: StringTableIndex.Table] {
-        let localized = searchOrder.compactMap { app.languages[$0] }
-        var tables: [String: StringTableIndex.Table] = [:]
-        for name in Set(app.rootTables.keys).union(localized.flatMap(\.keys)) {
-            let candidates = [app.rootTables[name]] + localized.map { $0[name] }
-            tables[name] = StringTableIndex.Table(
-                strings: candidates.lazy.compactMap { $0?.strings }.first,
-                stringsdict: candidates.lazy.compactMap { $0?.stringsdict }.first
-            )
-        }
-        return tables
+    /// The localizations Foundation resolves `language` to among `localizations`, best
+    /// first: the language itself and its regional, script, and legacy equivalents
+    /// (`zh-Hant` for `zh-Hant-TW`, `es-419` for `es-MX`, `iw` for `he`), never another
+    /// language.
+    private static func localizations(matching language: String, in localizations: [String]) -> [String] {
+        let languageCode = Self.languageCode(of: language)
+        // Foundation answers a language nothing matches with English or the first
+        // candidate. Leading with Base, which matches no language, and keeping only the
+        // language's own family drops those answers.
+        let candidates = ["Base"] + localizations.filter { $0 != "Base" }
+        return Bundle.preferredLocalizations(from: candidates, forPreferences: [language])
+            .filter { $0 != "Base" && Self.languageCode(of: $0) == languageCode }
     }
 
-    private func writeTable(named name: String, app: StringTableIndex.Table?, release: StringTableIndex.Table?, into lprojURL: URL) throws {
+    private static func languageCode(of localization: String) -> String? {
+        let identifier = Locale.canonicalLanguageIdentifier(from: localization)
+        return Locale.components(fromIdentifier: identifier)[NSLocale.Key.languageCode.rawValue]
+    }
+
+    /// Writes table `name` into `lprojURL`: the app's files with the release's tables laid
+    /// over them, `releaseLayers` most specific first.
+    private func writeTable(named name: String, app: StringTableIndex.Table, releaseLayers: [StringTableIndex.Table], into lprojURL: URL) throws {
         let fileManager = FileManager.default
         let stringsURL = lprojURL.appendingPathComponent(name + ".strings")
         let stringsdictURL = lprojURL.appendingPathComponent(name + ".stringsdict")
 
-        guard let release else {
-            if let url = app?.strings {
+        guard !releaseLayers.isEmpty else {
+            if let url = app.strings {
                 try fileManager.copyItem(at: url, to: stringsURL)
             }
-            if let url = app?.stringsdict {
+            if let url = app.stringsdict {
                 try fileManager.copyItem(at: url, to: stringsdictURL)
             }
             return
         }
 
-        let releaseStrings = try release.strings.map(readStrings) ?? [:]
-        let releaseStringsdict = try release.stringsdict.map(readStringsdict) ?? [:]
-        // The release is authoritative for every key it contains, across both files: a
-        // key it ships as a plain string must lose the app's plural or device variants
-        // (Foundation prefers the `.stringsdict` entry), and the other way round. This
-        // is also what swizzled lookups serve.
-        let releaseKeys = Set(releaseStrings.keys).union(releaseStringsdict.keys)
-        let strings = (try app?.strings.map(readStrings) ?? [:])
-            .filter { !releaseKeys.contains($0.key) }
-            .merging(releaseStrings) { _, release in release }
-        let stringsdict = (try app?.stringsdict.map(readStringsdict) ?? [:])
-            .filter { !releaseKeys.contains($0.key) }
-            .merging(releaseStringsdict) { _, release in release }
+        var strings = try app.strings.map(readStrings) ?? [:]
+        var stringsdict = try app.stringsdict.map(readStringsdict) ?? [:]
+        // Least specific first, so the language's own release table is laid last. Each
+        // is authoritative for every key it contains, across both files: a key it ships
+        // as a plain string must lose the plural or device variants below it (Foundation
+        // prefers the `.stringsdict` entry), and the other way round. This is also what
+        // swizzled lookups serve.
+        for layer in releaseLayers.reversed() {
+            let layerStrings = try layer.strings.map(readStrings) ?? [:]
+            let layerStringsdict = try layer.stringsdict.map(readStringsdict) ?? [:]
+            for key in layerStrings.keys {
+                stringsdict[key] = nil
+            }
+            for key in layerStringsdict.keys {
+                strings[key] = nil
+            }
+            strings.merge(layerStrings) { _, release in release }
+            stringsdict.merge(layerStringsdict) { _, release in release }
+        }
 
         if !strings.isEmpty {
             try writePropertyList(strings, to: stringsURL)

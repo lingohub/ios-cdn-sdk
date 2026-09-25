@@ -80,9 +80,13 @@ enum TestArchives {
     /// A bundle laid out like a built app: Info.plist plus `<language>.lproj` string
     /// tables compiled to binary plists, as Xcode ships them. Stands in for
     /// `Bundle.main` as the base of merged bundles.
+    ///
+    /// - Parameter localizations: Declared in the Info.plist (`CFBundleLocalizations`), as
+    ///   an app does for languages it supports without `.lproj` folders.
     static func appBundle(
         at url: URL,
         developmentRegion: String = "en",
+        localizations: [String]? = nil,
         strings: [String: [String: [String: String]]],
         stringsdicts: [String: [String: [String: Any]]] = [:]
     ) throws -> Bundle {
@@ -97,13 +101,16 @@ enum TestArchives {
                 files["\(language).lproj/\(table).stringsdict"] = try PropertyListSerialization.data(fromPropertyList: entries, format: .binary, options: 0)
             }
         }
-        let info: [String: Any] = [
+        var info: [String: Any] = [
             "CFBundleDevelopmentRegion": developmentRegion,
             "CFBundleIdentifier": "com.lingohub.tests.app",
             "CFBundlePackageType": "APPL",
             "CFBundleShortVersionString": "1.0.0",
             "CFBundleVersion": "1",
         ]
+        if let localizations {
+            info["CFBundleLocalizations"] = localizations
+        }
         files["Info.plist"] = try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
         try write(files: files, to: url)
         return try XCTUnwrap(Bundle(url: url))
