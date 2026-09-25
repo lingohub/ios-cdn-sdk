@@ -17,4 +17,18 @@ extension URL {
         components.fragment = nil
         return components.string ?? "\(scheme ?? "?")://\(host ?? "?")\(path)"
     }
+
+    /// macOS metadata that archives and copied folders carry along (resource forks,
+    /// AppleDouble files, Finder state). Never localization content, so it must not
+    /// influence layout decisions, validation, or merging.
+    var lh_isMacOSMetadata: Bool {
+        let name = lastPathComponent
+        return name == "__MACOSX" || name == ".DS_Store" || name.hasPrefix("._")
+    }
+
+    /// Whether a directory exists at this file URL.
+    var lh_isDirectory: Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
 }

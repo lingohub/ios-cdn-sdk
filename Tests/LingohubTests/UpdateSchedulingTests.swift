@@ -64,6 +64,7 @@ final class UpdateSchedulingTests: XCTestCase {
 
     @MainActor
     override func tearDown() async throws {
+        await sut.waitForMergedBundleWork()
         sut.reset()
         _ = LingoHubSDK.testInstance() // restore the Mocker-backed API client
 

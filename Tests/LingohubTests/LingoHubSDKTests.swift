@@ -41,6 +41,7 @@ final class LingoHubSDKTests: XCTestCase {
 
     @MainActor
     override func tearDown() async throws {
+        await sut.waitForMergedBundleWork()
         sut.reset()
         Bundle.deswizzle()
 

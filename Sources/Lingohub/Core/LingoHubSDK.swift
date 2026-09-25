@@ -69,6 +69,11 @@ import Foundation
     /// join it instead of starting a second network round-trip and install.
     private var inFlightUpdate: Task<Bool, Error>?
 
+    /// Background merged-bundle work (a launch-time build, removing superseded
+    /// bundles), chained so it runs in order. Installs wait for it first, so installs
+    /// and merged-bundle work run strictly in order.
+    var pendingMergedBundleWork: Task<Void, Never>?
+
     /// Replaces the time update checks are paced by, so tests move it instead of waiting.
     var clockOverride: (@Sendable () -> Date)?
 
@@ -138,6 +143,9 @@ public extension LingoHubSDK {
         cacheManager.language = UserDefaults.standard.string(forKey: LingoHubConstants.languageOverride)
 
         self.appVersion = version
+
+        // Serve the restored release to `Bundle.lingohub`
+        restoreMergedBundle()
     }
 
     /**
@@ -173,6 +181,12 @@ public extension LingoHubSDK {
     /**
      Swizzle the main Bundle of your Application.
      If swizzling is enabled just continue using *NSLocalizedString* methods as usual, LingoHub will do the rest.
+
+     Swizzling intercepts `Bundle.localizedString(forKey:value:table:)`, which serves
+     `NSLocalizedString` (Swift and Objective-C), storyboards, and XIBs. Swift-native
+     lookups (`String(localized:)`, `LocalizedStringResource`,
+     `AttributedString(localized:)`, SwiftUI `Text`) never call that method; pass
+     ``Foundation/Bundle/lingohub`` to them.
 
      Swizzling stays active for the lifetime of the process; there is no API to
      disable it at runtime.
@@ -273,6 +287,36 @@ public extension LingoHubSDK {
         // the caller no longer wants.
         try Task.checkCancellation()
         return result
+    }
+}
+
+@available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *)
+public extension LingoHubSDK {
+    /**
+     Retargets a `LocalizedStringResource` that looks up your app bundle to
+     ``Foundation/Bundle/lingohub``, so it shows downloaded translations wherever a
+     `LocalizedStringResource` is accepted:
+
+     ```swift
+     Text(LingoHubSDK.shared.resolve("welcome_message"))
+     Button(LingoHubSDK.shared.resolve("save_button")) { save() }
+     let status = String(localized: LingoHubSDK.shared.resolve("\(unread) unread messages"))
+     ```
+
+     Key, table, default value, locale, and interpolation arguments are kept.
+     `LocalizedStringResource.bundle` is read-only, so the resource is rebuilt through
+     its `Codable` representation. That format is Apple's, not a documented contract,
+     which makes this best effort: should it ever stop round-tripping, the resource is
+     returned unchanged and shows your bundled strings. Resources that look up another
+     bundle (a framework, a Swift package) are returned unchanged, as is every resource
+     while no release is active.
+
+     Resolve where the string is used, for example in a view's `body`: the result
+     belongs to the release and language active at the time of the call. ``Text(lh:)``
+     and ``String(lh:)`` are shorthands for the common cases.
+     */
+    nonisolated func resolve(_ resource: LocalizedStringResource) -> LocalizedStringResource {
+        return LingoHubResourceResolver.resolve(resource, store: cacheManager)
     }
 }
 
@@ -491,13 +535,18 @@ extension LingoHubSDK {
     }
 
     /// Installs a downloaded release archive and publishes it:
-    /// stage + validate + move into a folder of its own (off the main actor), then —
-    /// back on the main actor — activate the new snapshot, persist the release metadata,
-    /// and notify observers. Observers of `LingoHubDidUpdateLocalization` always see the
-    /// new release. The replaced release stays on disk until the next launch: lookups
-    /// that resolved it before the swap still read from it, and it remains the fallback
-    /// should the new release's metadata not reach disk.
+    /// stage + validate + build the merged bundle + move into a folder of its own (off
+    /// the main actor), then — back on the main actor — activate the new snapshot,
+    /// persist the release metadata, and notify observers. Observers of
+    /// `LingoHubDidUpdateLocalization` always see the new release, through swizzled
+    /// lookups and `Bundle.lingohub` alike. The replaced release stays on disk until the
+    /// next launch: lookups that resolved it before the swap still read from it, and it
+    /// remains the fallback should the new release's metadata not reach disk.
     func installArchive(at archiveURL: URL, identifier: String, appVersion: String, expectedSha256: String? = nil) async throws {
+        // Let launch-time merged-bundle work finish first, so installs and merged-bundle
+        // work run strictly in order.
+        await pendingMergedBundleWork?.value
+
         // Every release gets a path of its own (see `makeReleaseUrl`)
         guard let releaseURL = cacheManager.makeReleaseUrl(),
               let folderURL = cacheManager.updateBundleFolderUrl else {
@@ -505,28 +554,125 @@ extension LingoHubSDK {
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Could not determine storage location", errorCodes: [])
         }
 
+        let installed: UpdateInstaller.InstallResult
         do {
             try FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true)
-            _ = try await installer.install(archiveURL: archiveURL, liveBundleURL: releaseURL, expectedSha256: expectedSha256)
+            // The merged bundle is built from the staged release, before the move, so
+            // the release and its merged bundle go live together right below.
+            installed = try await installer.install(
+                archiveURL: archiveURL,
+                liveBundleURL: releaseURL,
+                expectedSha256: expectedSha256,
+                mergedBundle: mergedBundleBuilder(distributionVersion: identifier)
+            )
         } catch {
             LingoHubLogger.shared.log("Error installing bundle: \(error)")
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Failed to install bundle: \(error.localizedDescription)", errorCodes: [])
         }
+        let mergedBundle = installed.mergedBundle
 
         // Downloaded translations are re-downloadable, keep them out of device backups
         cacheManager.excludeFromBackup(folderURL)
 
-        guard cacheManager.activate(bundleURL: releaseURL, distributionVersion: identifier, appVersion: appVersion) else {
+        guard cacheManager.activate(bundleURL: releaseURL, distributionVersion: identifier, appVersion: appVersion, mergedBundle: mergedBundle) else {
             await installer.removeRelease(at: releaseURL)
             throw LingoHubSDKError.apiError(statusCode: 0, message: "Installed bundle could not be opened", errorCodes: [])
         }
 
         cacheManager.persistRelease(at: releaseURL, distributionVersion: identifier, appVersion: appVersion)
 
+        // The replaced merged bundle stays until the next launch (see
+        // `LocalizationCacheManager.mergedBundlesInUse`).
+
         // The snapshot swap above already cleared all caches, so observers that read
         // localized strings synchronously get content from the new release.
         NotificationCenter.default.post(name: .LingoHubDidUpdateLocalization, object: nil)
         LingoHubLogger.shared.log("Bundle successfully updated to release \(identifier)")
+    }
+}
+
+// MARK: Merged Bundle
+
+extension LingoHubSDK {
+    /// Makes the release restored at launch available to `Bundle.lingohub`. A merged
+    /// bundle an earlier launch built from the same release and the same app tables is
+    /// reused synchronously, so the first frame already reads it. Otherwise it is rebuilt
+    /// off the main actor and `.LingoHubDidUpdateLocalization` is posted once it is
+    /// active; until then `Bundle.lingohub` is `Bundle.main`.
+    private func restoreMergedBundle() {
+        guard let folderURL = cacheManager.mergedBundlesFolderUrl else { return }
+
+        guard let snapshot = cacheManager.currentSnapshot else {
+            // No release: whatever merged bundles are left over belong to a discarded one
+            if FileManager.default.fileExists(atPath: folderURL.path) {
+                enqueueMergedBundleWork {
+                    await self.removeUnusedMergedBundles(in: folderURL)
+                }
+            }
+            return
+        }
+
+        let snapshotID = snapshot.id
+        let releaseURL = snapshot.bundleURL
+        let distributionVersion = snapshot.distributionVersion
+        let manifest = MergedBundleManifest(
+            distributionVersion: distributionVersion,
+            sourceFingerprint: MergedBundleSource(bundle: cacheManager.baseBundle).fingerprint()
+        )
+        if let mergedBundle = MergedBundle.reusable(matching: manifest, in: folderURL),
+           cacheManager.attachMergedBundle(mergedBundle, toSnapshot: snapshotID) {
+            LingoHubLogger.shared.log("Merged bundle: reusing \(mergedBundle.url.lastPathComponent)")
+            enqueueMergedBundleWork {
+                await self.removeUnusedMergedBundles(in: folderURL)
+            }
+            return
+        }
+
+        guard let builder = mergedBundleBuilder(distributionVersion: distributionVersion) else { return }
+        enqueueMergedBundleWork { [installer, cacheManager] in
+            await self.removeUnusedMergedBundles(in: folderURL)
+            let mergedBundle: MergedBundle
+            do {
+                mergedBundle = try await installer.buildMergedBundle(builder, from: releaseURL)
+            } catch {
+                // `Bundle.lingohub` keeps serving `Bundle.main`; swizzled lookups are unaffected
+                LingoHubLogger.shared.log("Merged bundle: could not build it for release \(distributionVersion): \(error)")
+                return
+            }
+            guard cacheManager.attachMergedBundle(mergedBundle, toSnapshot: snapshotID) else {
+                // configure ran again or the release was discarded while this was
+                // building: this bundle was never handed out
+                await self.removeUnusedMergedBundles(in: folderURL)
+                return
+            }
+            NotificationCenter.default.post(name: .LingoHubDidUpdateLocalization, object: nil)
+        }
+    }
+
+    /// Removes merged bundles this process never activated: leftovers of earlier
+    /// launches and builds that were superseded before being attached. Bundles
+    /// activated in this process stay until the next launch (see
+    /// `LocalizationCacheManager.mergedBundlesInUse`).
+    private func removeUnusedMergedBundles(in folderURL: URL) async {
+        await installer.removeMergedBundles(in: folderURL, keeping: cacheManager.mergedBundlesInUse)
+    }
+
+    /// Builds merged bundles for `distributionVersion` from the app bundle's tables.
+    private func mergedBundleBuilder(distributionVersion: String) -> MergedBundleBuilder? {
+        guard let folderURL = cacheManager.mergedBundlesFolderUrl else { return nil }
+        return MergedBundleBuilder(
+            source: MergedBundleSource(bundle: cacheManager.baseBundle),
+            distributionVersion: distributionVersion,
+            folder: folderURL
+        )
+    }
+
+    private func enqueueMergedBundleWork(_ work: @escaping @MainActor @Sendable () async -> Void) {
+        let previous = pendingMergedBundleWork
+        pendingMergedBundleWork = Task { @MainActor in
+            await previous?.value
+            await work()
+        }
     }
 }
 

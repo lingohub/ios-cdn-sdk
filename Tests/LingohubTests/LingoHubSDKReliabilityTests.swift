@@ -10,16 +10,6 @@ import XCTest
 @testable import Lingohub
 import Mocker
 
-/// Thread-safe box for values captured inside notification blocks or background threads.
-private final class CapturedValue<T>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var _value: T?
-    var value: T? {
-        get { lock.lh_withLock { _value } }
-        set { lock.lh_withLock { _value = newValue } }
-    }
-}
-
 /// An `APIClientProtocol` fake whose check call blocks on a test-controlled gate,
 /// so tests can hold an update cycle provably in flight - no sleep choreography,
 /// no dependence on runner speed. Reports "nothing new" once the gate opens.
@@ -81,6 +71,7 @@ final class LingoHubSDKReliabilityTests: XCTestCase {
 
     @MainActor
     override func tearDown() async throws {
+        await sut.waitForMergedBundleWork()
         sut.reset()
         Bundle.deswizzle()
         _ = LingoHubSDK.testInstance() // restore the Mocker-backed API client

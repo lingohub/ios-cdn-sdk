@@ -2,9 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [2.1.0] - Unreleased
+
+2.1 serves downloaded translations to Swift-native lookups — SwiftUI `Text`, `String(localized:)`, `LocalizedStringResource`, `AttributedString(localized:)` — which swizzling never reached, and corrects the documentation that said otherwise. Additive: no source changes needed. Swizzled `NSLocalizedString` lookups work as before, with one fix (see Fixed). The SDK also paces its update checks and handles failed ones with a retry and pause policy shared with the Android SDK, so `update()` can report `false` without contacting the CDN (see Changed).
+
+### Corrected
+- **The documentation claimed coverage the SDK did not provide.** Since 1.1.0 the README called String Catalogs "supported" and showed a SwiftUI quick start with `swizzleMainBundle()` alone. Swizzling intercepts one method, `Bundle.localizedString(forKey:value:table:)`: `NSLocalizedString` (Swift and Objective-C), storyboards, and XIBs go through it; `String(localized:)`, `LocalizedStringResource`, `AttributedString(localized:)`, and SwiftUI `Text("key")` never do, so apps using them downloaded releases but kept showing their bundled strings. The file format was never the problem — String Catalogs compile to `.strings`/`.stringsdict`, the formats releases use; the lookup API decides. The README now documents exactly which APIs are covered, each backed by a test, and the demo app (which only worked because it wrapped every string in `Text(NSLocalizedString(...))`) uses idiomatic SwiftUI.
+
+### Added
+- `Bundle.lingohub`: pass it to Swift-native lookups — `Text("key", bundle: .lingohub)`, `String(localized:bundle:)`, `AttributedString(localized:bundle:)`. It serves the active release, falls back to your bundled strings for keys the release lacks (`.stringsdict` plurals and markdown included), and honors `setLanguage(_:)`. Without an active release it is `Bundle.main`. Public API only: no private selectors are hooked.
+- `LingoHubSDK.resolve(_:)`, `Text(lh:)`, and `String(lh:)` for `LocalizedStringResource` (iOS 16 / macOS 13): retarget a resource that looks up the app bundle to `Bundle.lingohub`, keeping key, table, default value, locale, and interpolation arguments; Xcode keeps extracting the strings into the String Catalog. Best effort by design: `LocalizedStringResource.bundle` is read-only, so the resource is rebuilt through Apple's `Codable` representation, and if that ever stops round-tripping the resource is returned unchanged. Resources of other bundles (frameworks, Swift packages) are left alone.
+- `LingoHubSDK.shared.minimumCheckInterval`: the minimum time between update checks.
 
 ### Changed
+- When a release is activated, the SDK writes a merged bundle next to it (Application Support, excluded from backups). Each of its language folders holds the app's string tables as Foundation resolves them for that language, file by file: nonlocalized tables first, then the language, the localizations Foundation falls back to for it (`de` for `de-AT`, `zh-Hant` for `zh-Hant-TW`, `es-419` for `es-MX`), `Base`, and, for a table the language has no file of, the development language. An app with nonlocalized tables gets a folder for every language it supports. The release's entries are laid over the app's tables, including the release's update of a language the lookup falls back to, and a key the release defines replaces the app's entry in both `.strings` and `.stringsdict`, as swizzled lookups already did.
+- The merged bundle is built off the main thread and activated together with its release. It is reused across launches while the release and the app's tables are unchanged, and rebuilt otherwise. A merged bundle that was in use during a session is kept until the next launch, so views and stored resources can still read from it; all are discarded with the release.
+- `.LingoHubDidUpdateLocalization` is also posted when translations downloaded earlier become available to `Bundle.lingohub` shortly after launch (the first launch with 2.1, or of an app build whose bundled strings changed).
 - **`update()` paces its own checks.** Within `minimumCheckInterval` after a successful update check (15 minutes; no interval in debug builds), `update()` and `updateAsync()` report `false` without contacting the CDN. Call `update()` whenever your app becomes active: the do-it-yourself `UpdateThrottle` the README used to suggest is no longer needed.
 - Failed update checks follow one retry and pause policy, shared with the Android SDK and documented in the README's new "Failures and retries" section (lingohub/organization#2351):
   - A `5xx` from the CDN is retried once, after the delay the response's `Retry-After` asks for, or after a random 2–5 seconds. When the retry fails as well, update checks pause for 5 minutes, doubling with each further failed update in a row up to an hour. Previously every `update()` call went to the CDN.
@@ -13,11 +26,13 @@ All notable changes to this project will be documented in this file.
   - Pauses are stored on the device and survive app restarts; a new app version, another environment or another CDN key starts without one (and without the minimum interval). While a pause lasts, `update()` reports the failure that caused it without contacting the CDN.
   - Client errors (`400`, `401`, a `404` other than `DISTRIBUTION_NOT_FOUND`) are logged once per process instead of on every check.
 
-### Added
-- `LingoHubSDK.shared.minimumCheckInterval`: the minimum time between update checks.
-
 ### Fixed
 - After a second release was installed in the same app session, `NSLocalizedString` kept serving the first release's `.stringsdict` plurals, and missed string tables only the new release had, until the app was relaunched. Keys of `.strings` tables both releases had were unaffected. Foundation caches bundles and the string tables it loaded from them by path, and every release was installed at the same path. Each release is now installed into a folder of its own (`Application Support/Lingohub/releases/`). The replaced release is kept until the next launch, so lookups that already resolved it still complete, and it remains the fallback should the new release's metadata not reach disk. A release installed by an earlier SDK version keeps working and moves to the new layout with the next update.
+
+### Internal
+- Tests for every API in the README's coverage table, on macOS and the iOS simulator: `Bundle.lingohub` lookups with app-bundle fallback, plurals (including Russian categories under a language override), markdown, language switching, `LocalizedStringResource` retargeting, SwiftUI `Text` (checked by rendering), storyboards and XIBs through swizzling, launch-time reuse and rebuild, and consistency while releases are swapped.
+- Tests for the update-check policy through the SDK facade, with a scripted API client and an injectable clock: minimum interval, the single retry after a 5xx and its jitter bounds, `Retry-After`, pauses and their backoff across relaunches, the fresh check after an expired download URL, and scoping by app version, environment and CDN key.
+- CI: the Swift 6 language-mode job now compiles the SDK's own sources in that mode and is blocking. Until now it built every module in Swift 6 mode and stopped in ZIPFoundation, whose mutable globals that mode rejects, so it failed on every push without reaching a single SDK source. Dependencies now keep the language mode their manifests declare, as they do in apps.
 
 ## [2.0.0] - 2026-09-02
 
@@ -72,7 +87,7 @@ All notable changes to this project will be documented in this file.
 - Downloaded translation bundles moved from `Documents/Lingohub` (visible in the Files app with file sharing enabled, included in backups) to Application Support, excluded from backups. Existing installs are migrated automatically.
 - The keychain installation identifier is now stored under the SDK's own service (`com.lingohub.sdk`) with `kSecAttrAccessibleAfterFirstUnlock`, instead of a generic un-namespaced item. Identifiers written by SDK 1.0.x are adopted automatically.
 - Transport failures before a response is received (offline, DNS, timeout) and local request/response failures are now reported as `.apiError(statusCode: 0, ...)` per the documented contract, instead of `.unknown`.
-- README rewritten to mirror the [LingoHub Android SDK](https://github.com/lingohub/android-cdn-sdk): all snippets compile, documents where the CDN API key comes from (keys start with `lh-cdn_`), file-format notes (`.stringsdict`, String Catalogs), an error-code table with remediation advice, troubleshooting, and a complete privacy/data-flow disclosure.
+- README rewritten to mirror the [LingoHub Android SDK](https://github.com/lingohub/android-cdn-sdk): all snippets compile, documents where the CDN API key comes from (keys start with `lh-cdn_`), file-format notes (`.stringsdict`, String Catalogs — the String Catalog note overstated coverage, corrected in 2.1.0), an error-code table with remediation advice, troubleshooting, and a complete privacy/data-flow disclosure.
 - Demo app references the SDK by local path instead of a pinned remote revision, so it always runs against the checked-out code.
 
 ### Fixed

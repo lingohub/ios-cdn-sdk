@@ -16,8 +16,9 @@ struct LingoHubApp: App {
         // Configure LingoHub SDK
         LingoHubSDK.shared.configure(withApiKey: "YOUR_API_KEY")
 
+        // Serves NSLocalizedString, UIKit, and storyboards. SwiftUI views pass
+        // `bundle: .lingohub` instead (see ContentView).
         LingoHubSDK.shared.swizzleMainBundle()
-
     }
 
     var body: some Scene {

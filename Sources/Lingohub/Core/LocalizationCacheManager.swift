@@ -12,19 +12,26 @@ import Foundation
 /// is swapped atomically: readers either see the previous release or the new one,
 /// never a mix of filesystem, UserDefaults, and cache state.
 struct LocalizationSnapshot {
+    /// Distinguishes activations, so work started for one snapshot (a merged-bundle
+    /// build) can never attach to a later one.
+    let id: UInt64
     let bundle: Bundle
     let bundleURL: URL
     let distributionVersion: String
     let appVersion: String
+    /// Serves this release to Swift-native lookups via `Bundle.lingohub`; nil until it
+    /// has been built, or when it could not be.
+    var mergedBundle: MergedBundle?
 }
 
 /// Thread-safe store for the localization state the SDK shares with the swizzled
-/// `Bundle.localizedString(forKey:value:table:)` implementation.
+/// `Bundle.localizedString(forKey:value:table:)` implementation and `Bundle.lingohub`.
 ///
 /// `NSLocalizedString` can be called from any thread, so everything in here must be
 /// safe to access without main-actor isolation: all mutable state is protected by a
-/// lock. The hot path (`getString`, `languageBundle(for:)`, `isUpdateActive`) never
-/// touches the filesystem or UserDefaults — it only reads the in-memory snapshot.
+/// lock. The hot path (`getString`, `languageBundle(for:)`, `isUpdateActive`,
+/// `lingohubBundle`) never touches the filesystem or UserDefaults — it only reads the
+/// in-memory snapshot.
 final class LocalizationCacheManager: @unchecked Sendable {
 
     static let shared = LocalizationCacheManager()
@@ -46,12 +53,18 @@ final class LocalizationCacheManager: @unchecked Sendable {
     // (Foundation loads tables lazily), so none of these is deleted while the process
     // runs; the next launch removes those no metadata refers to.
     private var releasesInUse: Set<String> = []
+    private var lastSnapshotID: UInt64 = 0
+    // Every merged bundle activated in this process. Views and resources may still
+    // resolve against any of them, and Foundation reads their tables lazily, so none is
+    // deleted while the process runs; the next launch removes the unused ones.
+    private var _mergedBundlesInUse: Set<URL> = []
     private var _language: String?
     private var _swizzledBundlePaths: [String] = []
     // Storage roots can be overridden (by tests) so nothing ever touches the real
     // user directories; nil means the standard user-domain locations are used.
     private var _storageRootOverride: URL?
     private var _legacyStorageRootOverride: URL?
+    private var _baseBundleOverride: Bundle?
 
     init() {}
 
@@ -65,6 +78,17 @@ final class LocalizationCacheManager: @unchecked Sendable {
     var legacyStorageRootOverride: URL? {
         get { lock.lh_withLock { _legacyStorageRootOverride } }
         set { lock.lh_withLock { _legacyStorageRootOverride = newValue } }
+    }
+
+    /// Replaces `Bundle.main` as the app bundle merged bundles are built from. Test hook.
+    var baseBundleOverride: Bundle? {
+        get { lock.lh_withLock { _baseBundleOverride } }
+        set { lock.lh_withLock { _baseBundleOverride = newValue } }
+    }
+
+    /// The app bundle whose string tables merged bundles are built from.
+    var baseBundle: Bundle {
+        return baseBundleOverride ?? .main
     }
 
     // MARK: - Shared state
@@ -110,30 +134,69 @@ final class LocalizationCacheManager: @unchecked Sendable {
 
     /// Publishes a freshly installed release as the active snapshot and clears all
     /// caches, as one transaction: a reader either sees the old release with the old
-    /// cache or the new release with an empty cache.
+    /// cache (and old merged bundle) or the new release with an empty cache (and its
+    /// merged bundle).
     ///
     /// - Returns: false when no `Bundle` can be created at `bundleURL`.
     @discardableResult
-    func activate(bundleURL: URL, distributionVersion: String, appVersion: String) -> Bool {
+    func activate(bundleURL: URL, distributionVersion: String, appVersion: String, mergedBundle: MergedBundle? = nil) -> Bool {
         guard let bundle = Bundle(url: bundleURL) else {
             LingoHubLogger.shared.log("Cache Manager: could not create Bundle at \(bundleURL.path)")
             return false
         }
-        let snapshot = LocalizationSnapshot(
-            bundle: bundle,
-            bundleURL: bundleURL,
-            distributionVersion: distributionVersion,
-            appVersion: appVersion
-        )
         lock.lh_withLock {
-            _snapshot = snapshot
+            lastSnapshotID &+= 1
+            _snapshot = LocalizationSnapshot(
+                id: lastSnapshotID,
+                bundle: bundle,
+                bundleURL: bundleURL,
+                distributionVersion: distributionVersion,
+                appVersion: appVersion,
+                mergedBundle: mergedBundle
+            )
             localizationCache.removeAll()
             languageBundleCache.removeAll()
             cacheGeneration &+= 1
             releasesInUse.insert(bundleURL.path)
+            if let mergedBundle {
+                _mergedBundlesInUse.insert(mergedBundle.url)
+            }
         }
         LingoHubLogger.shared.log("Cache Manager: activated release \(distributionVersion)")
         return true
+    }
+
+    /// Attaches a merged bundle built after its release was activated (at launch).
+    ///
+    /// - Returns: false, attaching nothing, when the snapshot the bundle was built for
+    ///   is no longer active (a newer release was installed, or it was discarded).
+    @discardableResult
+    func attachMergedBundle(_ mergedBundle: MergedBundle, toSnapshot snapshotID: UInt64) -> Bool {
+        return lock.lh_withLock {
+            guard _snapshot?.id == snapshotID else { return false }
+            _snapshot?.mergedBundle = mergedBundle
+            _mergedBundlesInUse.insert(mergedBundle.url)
+            return true
+        }
+    }
+
+    /// The merged bundles activated in this process (see `_mergedBundlesInUse`).
+    var mergedBundlesInUse: [URL] {
+        return lock.lh_withLock { Array(_mergedBundlesInUse) }
+    }
+
+    /// Forgets which merged bundles this process activated, as a new process would. Test hook.
+    func forgetMergedBundlesInUse() {
+        lock.lh_withLock { _mergedBundlesInUse.removeAll() }
+    }
+
+    /// The bundle Swift-native lookups use (`Bundle.lingohub`), or nil when no merged
+    /// bundle is active. Honors the language override. Memory only, like the other
+    /// lookup paths: safe and cheap to call from any thread, as often as views render.
+    var lingohubBundle: Bundle? {
+        return lock.lh_withLock {
+            _snapshot?.mergedBundle?.bundle(forLanguage: _language)
+        }
     }
 
     /// Removes the active snapshot and clears all caches. Lookups fall back to the
@@ -425,6 +488,13 @@ final class LocalizationCacheManager: @unchecked Sendable {
     /// those installs survive the upgrade; the next install supersedes it.
     var fixedUpdateBundleUrl: URL? {
         return updateBundleFolderUrl?.appendingPathComponent(LocalizationCacheManager.fixedUpdateBundleName, isDirectory: true)
+    }
+
+    /// The folder merged bundles (`<id>.bundle`) are built in. It shares the LingoHub
+    /// folder with the releases, so merged bundles are excluded from backups like them
+    /// and discarded along with them.
+    var mergedBundlesFolderUrl: URL? {
+        return updateBundleFolderUrl?.appendingPathComponent(LingoHubConstants.mergedBundlesFolderName)
     }
 
     // MARK: - Storage housekeeping
