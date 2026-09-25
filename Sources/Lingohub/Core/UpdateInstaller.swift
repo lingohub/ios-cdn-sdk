@@ -21,7 +21,8 @@ import ZIPFoundation
 /// it is removed on the next launch.
 ///
 /// An actor so archive verification, extraction, and validation run off the main
-/// thread and concurrent installs are serialized.
+/// thread, and installs and merged-bundle builds (which read the installed release)
+/// are serialized.
 actor UpdateInstaller {
 
     /// Resource limits applied to a release archive before extraction. Translation
@@ -77,6 +78,15 @@ actor UpdateInstaller {
         self.limits = limits
     }
 
+    /// What an install produced.
+    struct InstallResult: Sendable {
+        /// The live bundle, now containing the complete new release.
+        let liveBundleURL: URL
+        /// The merged bundle built from the release before it went live; nil when none
+        /// was requested or it could not be built.
+        let mergedBundle: MergedBundle?
+    }
+
     /// Stages, validates, and atomically activates the archive at `archiveURL`.
     ///
     /// - Parameters:
@@ -86,8 +96,14 @@ actor UpdateInstaller {
     ///     staging directory so the final move is a same-volume atomic rename.
     ///   - expectedSha256: Optional SHA-256 hex digest from the release metadata.
     ///     When present, the archive must match it before anything is extracted.
-    /// - Returns: `liveBundleURL`, now containing the complete new release.
-    func install(archiveURL: URL, liveBundleURL: URL, expectedSha256: String?) throws -> URL {
+    ///   - mergedBundle: Builds the release's merged bundle from the validated staging
+    ///     directory, before the move. The release goes live with its merged bundle
+    ///     ready, so the caller activates both at once: swizzled lookups and
+    ///     `Bundle.lingohub` switch to it together, and a termination during the merge
+    ///     leaves the previous release live. A failed build is logged and does not fail
+    ///     the install.
+    @discardableResult
+    func install(archiveURL: URL, liveBundleURL: URL, expectedSha256: String?, mergedBundle builder: MergedBundleBuilder? = nil) throws -> InstallResult {
         let fileManager = FileManager.default
         let folderURL = liveBundleURL.deletingLastPathComponent()
 
@@ -98,6 +114,7 @@ actor UpdateInstaller {
         let stagingURL = folderURL.appendingPathComponent(LingoHubConstants.stagingDirectoryPrefix + UUID().uuidString)
         try fileManager.createDirectory(at: stagingURL, withIntermediateDirectories: true)
 
+        var mergedBundle: MergedBundle?
         do {
             LingoHubLogger.shared.log("Installer: extracting archive to staging at \(stagingURL.lastPathComponent)")
             try fileManager.unzipItem(at: archiveURL, to: stagingURL)
@@ -110,14 +127,18 @@ actor UpdateInstaller {
             values.isExcludedFromBackup = true
             try? stagingResourceURL.setResourceValues(values)
 
+            mergedBundle = builder.flatMap { buildMergedBundleIfPossible($0, from: stagingURL) }
             try activate(stagingURL: stagingURL, liveBundleURL: liveBundleURL)
         } catch {
             try? fileManager.removeItem(at: stagingURL)
+            if let mergedBundle {
+                try? fileManager.removeItem(at: mergedBundle.url)
+            }
             throw error
         }
 
         LingoHubLogger.shared.log("Installer: release activated at \(liveBundleURL.path)")
-        return liveBundleURL
+        return InstallResult(liveBundleURL: liveBundleURL, mergedBundle: mergedBundle)
     }
 
     // MARK: - Preflight
@@ -181,19 +202,6 @@ actor UpdateInstaller {
 
     // MARK: - Validation
 
-    /// Archive junk that must not influence layout decisions or validation
-    /// (macOS resource forks, AppleDouble files, Finder metadata).
-    private func isJunk(_ url: URL) -> Bool {
-        let name = url.lastPathComponent
-        return name == "__MACOSX" || name == ".DS_Store" || name.hasPrefix("._")
-    }
-
-    private func isDirectory(_ url: URL) -> Bool {
-        var isDirectory: ObjCBool = false
-        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
-        return isDirectory.boolValue
-    }
-
     /// A release is usable when the staging root contains at least one `<lang>.lproj`
     /// directory holding at least one valid `.strings`/`.stringsdict` file — the exact
     /// layout runtime lookup resolves (`Bundle.path(forResource:ofType:)` finds `.lproj`
@@ -209,9 +217,9 @@ actor UpdateInstaller {
         let rootEntries = (try? fileManager.contentsOfDirectory(at: stagingURL, includingPropertiesForKeys: nil)) ?? []
 
         var localizationFileCount = 0
-        for lprojURL in rootEntries where lprojURL.lastPathComponent.hasSuffix(".lproj") && isDirectory(lprojURL) {
+        for lprojURL in rootEntries where lprojURL.lastPathComponent.hasSuffix(".lproj") && lprojURL.lh_isDirectory {
             let files = (try? fileManager.contentsOfDirectory(at: lprojURL, includingPropertiesForKeys: nil)) ?? []
-            for fileURL in files where !isJunk(fileURL) {
+            for fileURL in files where !fileURL.lh_isMacOSMetadata {
                 let name = fileURL.lastPathComponent
                 switch fileURL.pathExtension {
                 case "strings":
@@ -259,5 +267,28 @@ actor UpdateInstaller {
         } catch {
             LingoHubLogger.shared.log("Installer: could not remove release \(releaseURL.lastPathComponent): \(error)")
         }
+    }
+
+    // MARK: - Merged bundles
+
+    /// Builds the merged bundle for the release at `releaseURL` (see
+    /// `MergedBundleBuilder`). Runs here so it is serialized with installs: a build
+    /// never reads a release that is being replaced.
+    func buildMergedBundle(_ builder: MergedBundleBuilder, from releaseURL: URL) throws -> MergedBundle {
+        return try builder.build(from: releaseURL)
+    }
+
+    private func buildMergedBundleIfPossible(_ builder: MergedBundleBuilder, from releaseURL: URL) -> MergedBundle? {
+        do {
+            return try builder.build(from: releaseURL)
+        } catch {
+            LingoHubLogger.shared.log("Merged bundle: could not build it for release \(builder.distributionVersion): \(error)")
+            return nil
+        }
+    }
+
+    /// Removes everything in `folder` except the merged bundles at `kept`.
+    func removeMergedBundles(in folder: URL, keeping kept: [URL]) {
+        MergedBundle.removeAll(in: folder, keeping: kept)
     }
 }

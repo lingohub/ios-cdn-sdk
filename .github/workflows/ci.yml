@@ -14,6 +14,30 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build
         run: swift build
+      # Swift and SwiftUI lookups are served through Bundle.lingohub, never by hooking
+      # the private Foundation methods those APIs use internally: that would risk App
+      # Review, and the names change between OS releases.
+      - name: No private localization selectors in the SDK binary
+        run: |
+          OBJECT=$(find .build \( -name 'LingoHubSDK.o' -o -name 'LingoHubSDK.swift.o' \) | head -n 1)
+          if [ -z "$OBJECT" ]; then
+            echo "::error::SDK object files not found"
+            exit 1
+          fi
+          OBJECTS_DIR=$(dirname "$OBJECT")
+          # These must be the SDK's objects: the public selector swizzling intercepts is in them
+          if ! grep -a -q -F 'localizedStringForKey:value:table:' "$OBJECTS_DIR"/*.o; then
+            echo "::error::Swizzled selector not found in $OBJECTS_DIR"
+            exit 1
+          fi
+          if grep -a -l -F \
+              -e '_localizedStringForKey:value:table:localizations:' \
+              -e 'localizedAttributedStringForKey:value:table:localization:' \
+              -e '_localizedStringNoCacheNoMarkdownParsingForKey:' \
+              "$OBJECTS_DIR"/*.o; then
+            echo "::error::The SDK references a private Foundation localization selector"
+            exit 1
+          fi
       # SDK sources must be completely free of strict-concurrency diagnostics —
       # these are the warnings that become errors in the Swift 6 language mode.
       # This step fails on any SDK warning; the swift6-mode job below compiles

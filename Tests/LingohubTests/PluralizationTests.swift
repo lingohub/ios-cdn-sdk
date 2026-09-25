@@ -31,6 +31,7 @@ final class PluralizationTests: XCTestCase {
 
     @MainActor
     override func tearDown() async throws {
+        await sut.waitForMergedBundleWork()
         sut.reset()
         Bundle.deswizzle()
         try await super.tearDown()
@@ -177,5 +178,7 @@ final class PluralizationTests: XCTestCase {
         XCTAssertEqual(format(3), "3 yabloka", "3 must select the 'few' category (Russian rules)")
         XCTAssertEqual(format(5), "5 yablok", "5 must select the 'many' category (Russian rules)")
         XCTAssertEqual(format(21), "21 yabloko", "21 must select the 'one' category (Russian rules)")
+        // The form the README shows
+        XCTAssertEqual(String(format: pattern, locale: russian, 3), "3 yabloka")
     }
 }

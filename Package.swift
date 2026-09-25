@@ -32,6 +32,11 @@ let package = Package(
         .testTarget(
             name: "LingohubTests",
             dependencies: ["Lingohub", "Mocker", "ZIPFoundation"],
+            exclude: [
+                // Sources of the compiled fixtures (see InterfaceBuilderLocalizationTests)
+                "Resources/InterfaceBuilder/Greeting.xib",
+                "Resources/InterfaceBuilder/Main.storyboard"
+            ],
             resources: [
                 .process("Resources/empty.json"),
                 .process("Resources/update_200.json"),
@@ -40,7 +45,8 @@ let package = Package(
                 .process("Resources/update_404.json"),
                 .process("Resources/update_429.json"),
                 .process("Resources/update.zip"),
-                .process("Resources/Localization")
+                .process("Resources/Localization"),
+                .copy("Resources/InterfaceBuilder/Compiled")
             ]
         ),
     ]
