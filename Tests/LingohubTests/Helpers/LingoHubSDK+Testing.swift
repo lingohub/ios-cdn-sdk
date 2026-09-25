@@ -36,5 +36,8 @@ public extension LingoHubSDK {
         environment = .production
         swizzledBundles = []
         cleanUp()
+        minimumCheckInterval = UpdatePolicy.defaultMinimumCheckInterval
+        clockOverride = nil
+        retryWaitOverride = nil
     }
 }

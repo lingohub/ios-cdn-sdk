@@ -12,8 +12,6 @@ import Lingohub
 struct LingoHubApp: App {
     @SwiftUI.Environment(\.scenePhase) private var scenePhase
 
-    private let updateThrottle = UpdateThrottle()
-
     init() {
         // Configure LingoHub SDK
         LingoHubSDK.shared.configure(withApiKey: "YOUR_API_KEY")
@@ -27,13 +25,10 @@ struct LingoHubApp: App {
             ContentView()
         }
         .onChange(of: scenePhase) { oldPhase, newPhase in
-            if newPhase == .active, updateThrottle.shouldCheckForUpdates() {
-                // Check for updates when the app becomes active, at most once a day
-                LingoHubSDK.shared.update { result in
-                    if case .success = result {
-                        updateThrottle.markCheckedNow()
-                    }
-                }
+            if newPhase == .active {
+                // Check for updates whenever the app becomes active. The SDK paces the
+                // requests: at most one check every 15 minutes in release builds.
+                LingoHubSDK.shared.update()
             }
         }
     }

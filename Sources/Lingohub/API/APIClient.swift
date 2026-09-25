@@ -112,7 +112,8 @@ extension APIClient {
                 infos = errorResponse.infos
                 LingoHubLogger.shared.log("Error message: \(message ?? "nil")")
             }
-            throw APIError.apiError(statusCode: httpResponse.statusCode, message: message, infos: infos)
+            let retryAfter = RetryAfter.delay(fromHeaderValue: httpResponse.value(forHTTPHeaderField: "Retry-After"))
+            throw APIError.apiError(statusCode: httpResponse.statusCode, message: message, infos: infos, retryAfter: retryAfter)
         }
     }
 

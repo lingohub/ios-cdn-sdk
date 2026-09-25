@@ -20,9 +20,10 @@ struct LingoHubConstants {
     /// Subfolder of `folderName` releases are installed into, each under a fresh name.
     static let releasesFolderName = "releases"
     static let languageOverride = "LingohubLanguageOverride"
-    static let usageCooldownUntil = "LingohubUsageCooldownUntil"
-    /// How long update checks stay paused after the CDN reports an exhausted usage budget (429).
-    static let usageLimitCooldownInterval: TimeInterval = 60 * 60
+    /// The persisted `UpdateSchedule`: last successful update and any pause of checks.
+    static let updateSchedule = "LingohubUpdateSchedule"
+    /// Where SDK 1.1 to 2.0 stored the pause after a 429; removed on configure.
+    static let legacyUsageCooldownUntil = "LingohubUsageCooldownUntil"
     static let updateNotification = "LingohubLocalization"
     /// Prefix of the temporary directories a release archive is extracted into before
     /// it is atomically activated. Leftovers (from a crash mid-install) are removed on configure.

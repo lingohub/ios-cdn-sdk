@@ -1,0 +1,70 @@
+//
+//  ScriptedAPIClient.swift
+//
+
+import Foundation
+@testable import Lingohub
+
+/// An `APIClientProtocol` fake that answers checks and downloads from scripts, in
+/// order, and records every call. A call beyond its script fails.
+final class ScriptedAPIClient: APIClientProtocol, @unchecked Sendable {
+    typealias CheckAnswer = Result<BundleInfo, Error>
+    typealias DownloadAnswer = Result<URL, Error>
+
+    struct ScriptExhausted: Error {}
+
+    private let lock = NSLock()
+    private var checkAnswers: [CheckAnswer]
+    private var downloadAnswers: [DownloadAnswer]
+    private var _checkCount = 0
+    private var _downloadedURLs: [URL] = []
+
+    var checkCount: Int { lock.lh_withLock { _checkCount } }
+    var downloadedURLs: [URL] { lock.lh_withLock { _downloadedURLs } }
+
+    init(checks: [CheckAnswer], downloads: [DownloadAnswer] = []) {
+        checkAnswers = checks
+        downloadAnswers = downloads
+    }
+
+    func checkForUpdates(apiKey: String, appVersion: String, sdkVersion: String, distributionVersion: String?, environment: Environment, deviceIdentifier: String?, languageCode: String?) async throws -> BundleInfo {
+        let answer: CheckAnswer = lock.lh_withLock {
+            _checkCount += 1
+            return checkAnswers.isEmpty ? .failure(ScriptExhausted()) : checkAnswers.removeFirst()
+        }
+        return try answer.get()
+    }
+
+    func download(from url: URL, maxSize: Int64?) async throws -> URL {
+        let answer: DownloadAnswer = lock.lh_withLock {
+            _downloadedURLs.append(url)
+            return downloadAnswers.isEmpty ? .failure(ScriptExhausted()) : downloadAnswers.removeFirst()
+        }
+        return try answer.get()
+    }
+}
+
+extension ScriptedAPIClient {
+    /// A 200 offering the test release for download from `filesUrl`.
+    static func release(filesUrl: String = "https://s3.amazon.de/update.zip") -> CheckAnswer {
+        return .success(BundleInfo(id: TestConstants.bundleIdentifier, name: "Test Bundle", filesUrl: URL(string: filesUrl)!, filesSha256: nil))
+    }
+
+    /// A 204: nothing new.
+    static var noContent: CheckAnswer {
+        return .failure(APIError.noContent)
+    }
+
+    /// An HTTP error answer, as `APIClient` reports it.
+    static func httpError(_ statusCode: Int, infos: [String] = [], retryAfter: TimeInterval? = nil) -> Error {
+        return APIError.apiError(statusCode: statusCode, message: "HTTP \(statusCode)", infos: infos, retryAfter: retryAfter)
+    }
+
+    /// A completed download: a fresh copy of the test release archive, which the SDK
+    /// deletes once installed.
+    static func archive() throws -> DownloadAnswer {
+        let copy = FileManager.default.temporaryDirectory.appendingPathComponent("LingohubScriptedDownload-\(UUID().uuidString).zip")
+        try FileManager.default.copyItem(at: TestConstants.updateBundleURL, to: copy)
+        return .success(copy)
+    }
+}
